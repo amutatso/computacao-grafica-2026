@@ -1,36 +1,14 @@
-"""
-Sistema Gráfico Interativo - Trabalho 1.1
-==========================================
-Sistema básico de Computação Gráfica 2D com:
-    - Display File (pontos, retas e wireframes/polígonos)
-    - Window (região do mundo visualizada)
-    - Viewport (transformação window -> tela, sem distorção)
-    - Panning (mover a window)
-    - Zooming (redimensionar a window)
-
-O código é dividido em 4 partes bem separadas:
-    1) DISPLAY FILE  -> o que existe no mundo
-    2) WINDOW        -> o que está sendo visualizado do mundo
-    3) VIEWPORT       -> como converter mundo -> pixels de tela
-    4) INTERFACE (Tkinter) -> junta tudo e desenha na tela
-
-Só usamos canvas.create_line() para desenhar (pontos, retas e
-wireframes). Não usamos create_polygon nem create_oval.
-"""
-
 import ast
 import tkinter as tk
 from tkinter import messagebox
 
 
-# =============================================================
-# 1) DISPLAY FILE
-# =============================================================
+
+
+# DISPLAY FILE
 # O Display File é a lista de todos os objetos gráficos que
-# existem no mundo. Cada objeto tem:
-#   - nome           : identifica o objeto na lista
-#   - tipo            : "ponto", "reta" ou "wireframe"
-#   - coordenadas     : lista de tuplas (x, y), em coordenadas do MUNDO
+# existem no mundo. Cada objeto tem nome, tipo (ponto, reta ou frame) e coordenadas.
+
 
 class Objeto2D:
     def __init__(self, nome, tipo, coordenadas):
@@ -57,11 +35,8 @@ class DisplayFile:
         del self.objetos[indice]
 
 
-# =============================================================
 # 2) WINDOW
-# =============================================================
-# A Window é a "câmera": define qual pedaço do mundo está sendo
-# visualizado no momento, em coordenadas do MUNDO.
+# A Window define qual pedaço do mundo está sendo visualizado no momento, em coordenadas do mundo.
 
 class Window:
     def __init__(self, xmin, ymin, xmax, ymax):
@@ -104,13 +79,11 @@ class Window:
         self.ymax = cy + nova_altura / 2
 
 
-# =============================================================
 # 3) VIEWPORT
-# =============================================================
-# Converte um ponto em coordenadas do MUNDO (dentro da window)
+# Converte um ponto em coordenadas do mundo (dentro da window)
 # para coordenadas de TELA (pixels dentro do canvas).
 #
-# Ponto importante: para NÃO distorcer os objetos, usamos a MESMA
+# Para NÃO distorcer os objetos, usamos a MESMA
 # escala nos eixos X e Y (a menor das duas escalas possíveis).
 
 class Viewport:
@@ -144,9 +117,7 @@ class Viewport:
         return x_tela, y_tela
 
 
-# =============================================================
-# 4) INTERFACE GRÁFICA (Tkinter)
-# =============================================================
+# Tkinter
 
 class Aplicacao:
     LARGURA_CANVAS = 640
@@ -163,11 +134,11 @@ class Aplicacao:
         self._montar_interface()
         self._redesenhar()
 
-    # ---------------------------------------------------------
+
     # Montagem da interface (canvas + painel lateral)
-    # ---------------------------------------------------------
+ 
     def _montar_interface(self):
-        # --- Canvas (à esquerda) ---
+        #Canvas (à esquerda)
         self.canvas = tk.Canvas(
             self.raiz,
             width=self.LARGURA_CANVAS,
@@ -176,7 +147,7 @@ class Aplicacao:
         )
         self.canvas.grid(row=0, column=0, rowspan=20, padx=10, pady=10)
 
-        # --- Painel lateral (à direita) ---
+        # Painel lateral (à direita)
         painel = tk.Frame(self.raiz)
         painel.grid(row=0, column=1, sticky="n", padx=10, pady=10)
 
@@ -185,7 +156,7 @@ class Aplicacao:
         self.lista_objetos = tk.Listbox(painel, width=30, height=8)
         self.lista_objetos.pack()
 
-        # --- Formulário de novo objeto ---
+        # Formulário de novo objeto
         tk.Label(painel, text="Novo objeto").pack(anchor="w", pady=(15, 0))
 
         tk.Label(painel, text="Nome:").pack(anchor="w")
@@ -208,7 +179,7 @@ class Aplicacao:
             painel, text="Adicionar objeto", command=self._adicionar_objeto
         ).pack(pady=5)
 
-        # --- Controles de navegação (panning) ---
+        # Navegação (panning)
         tk.Label(painel, text="Navegação (Pan)").pack(anchor="w", pady=(15, 0))
         frame_pan = tk.Frame(painel)
         frame_pan.pack()
@@ -230,7 +201,7 @@ class Aplicacao:
             command=lambda: self._pan(0, -passo_pan)
         ).grid(row=2, column=1)
 
-        # --- Controles de zoom ---
+        # Zoom
         tk.Label(painel, text="Zoom").pack(anchor="w", pady=(15, 0))
         frame_zoom = tk.Frame(painel)
         frame_zoom.pack()
@@ -241,9 +212,7 @@ class Aplicacao:
             frame_zoom, text="Zoom -", command=lambda: self._zoom(1.1)
         ).grid(row=0, column=1, padx=2)
 
-    # ---------------------------------------------------------
     # Ações do usuário
-    # ---------------------------------------------------------
     def _adicionar_objeto(self):
         nome = self.entrada_nome.get().strip()
         tipo = self.tipo_selecionado.get()
@@ -290,7 +259,7 @@ class Aplicacao:
         """
         tupla_de_pontos = ast.literal_eval(texto)
 
-        # Caso especial: se o usuário digitou só UM ponto, ex: "(0,0)",
+        # Se o usuário digitou apenas um ponto, ex: "(0,0)",
         # o literal_eval devolve (0, 0) -- uma tupla de dois números --
         # em vez de ((0, 0),) -- uma tupla contendo um ponto. Detectamos
         # esse caso e "envelopamos" o ponto numa tupla externa.
@@ -308,9 +277,7 @@ class Aplicacao:
         self.window.aplicar_zoom(fator)
         self._redesenhar()
 
-    # ---------------------------------------------------------
     # Desenho
-    # ---------------------------------------------------------
     def _redesenhar(self):
         self.canvas.delete("all")
         self.lista_objetos.delete(0, tk.END)
@@ -348,9 +315,7 @@ class Aplicacao:
             self.canvas.create_line(p1[0], p1[1], p2[0], p2[1], fill="red")
 
 
-# =============================================================
-# PONTO DE ENTRADA
-# =============================================================
+# Inicializacao
 if __name__ == "__main__":
     raiz = tk.Tk()
     app = Aplicacao(raiz)
