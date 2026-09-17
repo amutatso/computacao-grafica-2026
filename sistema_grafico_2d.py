@@ -7,19 +7,21 @@ from tkinter import colorchooser, filedialog, messagebox
 # DISPLAY FILE
 # O Display File é a lista de todos os objetos gráficos que
 # existem no mundo. Cada objeto tem nome, tipo (ponto, reta ou
-# wireframe), coordenadas (em coordenadas do MUNDO, sempre) e a
-# cor usada para desenhar as linhas.
+# wireframe), coordenadas (em coordenadas do MUNDO, sempre), a cor
+# das linhas e, para wireframes, se deve ser desenhado preenchido.
 
 
 class Objeto2D:
-    def __init__(self, nome, tipo, coordenadas, cor="#000000"):
+    def __init__(self, nome, tipo, coordenadas, cor="#000000", preenchido=False):
         self.nome = nome
         self.tipo = tipo                  # "ponto" | "reta" | "wireframe"
         self.coordenadas = coordenadas    # [(x1, y1), (x2, y2), ...]
         self.cor = cor                    # cor das linhas, em hexadecimal
+        self.preenchido = preenchido      # só relevante para wireframe
 
     def __repr__(self):
-        return f"{self.nome} [{self.tipo}]"
+        sufixo = " (preenchido)" if self.preenchido else ""
+        return f"{self.nome} [{self.tipo}]{sufixo}"
 
 
 class DisplayFile:
@@ -28,8 +30,8 @@ class DisplayFile:
     def __init__(self):
         self.objetos = []
 
-    def adicionar(self, nome, tipo, coordenadas, cor="#000000"):
-        objeto = Objeto2D(nome, tipo, coordenadas, cor)
+    def adicionar(self, nome, tipo, coordenadas, cor="#000000", preenchido=False):
+        objeto = Objeto2D(nome, tipo, coordenadas, cor, preenchido)
         self.objetos.append(objeto)
         return objeto
 
@@ -43,12 +45,7 @@ class DisplayFile:
 # WINDOW
 #
 # A Window é descrita pelo seu centro, sua largura/altura e um
-# ÂNGULO de rotação em relação ao mundo. Isso substitui a antiga
-# representação por xmin/xmax/ymin/ymax: uma window rotacionada
-# não é mais um retângulo alinhado aos eixos do mundo, então min/
-# max deixam de fazer sentido -- centro + tamanho + ângulo é a
-# forma padrão de descrever isso (é o que os livros de CG chamam
-# de Plano de Projeção / PPC quando aplicado aos objetos).
+# ângulo de rotação em relação ao mundo.
 
 class Window:
     def __init__(self, centro_x, centro_y, largura, altura, angulo=0.0):
@@ -63,42 +60,30 @@ class Window:
         return self.centro_x, self.centro_y
 
     def mover(self, dx_local, dy_local):
-        """
-        Panning: desloca o centro da window. dx_local/dy_local são
-        deslocamentos no referencial da PRÓPRIA window (ou seja,
-        "pra frente"/"pra cima" do ponto de vista de quem está
-        navegando), não do mundo. Por isso, se a window estiver
-        rotacionada, precisamos girar esse deslocamento pelo ângulo
-        atual antes de somar às coordenadas do mundo.
-        """
+        """Panning: dx_local/dy_local são deslocamentos no referencial
+        da PRÓPRIA window (o "pra cima" de quem está navegando)."""
         rad = math.radians(self.angulo)
         cos_a, sin_a = math.cos(rad), math.sin(rad)
         self.centro_x += dx_local * cos_a - dy_local * sin_a
         self.centro_y += dx_local * sin_a + dy_local * cos_a
 
     def aplicar_zoom(self, fator):
-        """
-        Zooming: muda o tamanho da window mantendo o mesmo centro.
-        fator < 1 -> aproxima (zoom in)
-        fator > 1 -> afasta   (zoom out)
-        Não depende do ângulo: encolher/esticar os dois lados por
-        igual não muda de sentido só porque a window está rotacionada.
-        """
         self.largura *= fator
         self.altura *= fator
 
     def rotacionar(self, delta_graus):
-        """Gira a window em torno do seu próprio centro."""
         self.angulo += delta_graus
 
     def mundo_para_local(self, ponto_mundo):
         """
         Converte um ponto do MUNDO para o sistema de coordenadas da
-        PRÓPRIA window: centralizado nela e alinhado com sua rotação
-        (é o algoritmo de "Gerar Descrição" em PPC). Primeiro tira o
-        centro da window do ponto, depois desfaz a rotação da window
-        (gira por -ângulo). O resultado: quando a window gira num
-        sentido, o mundo parece girar no sentido contrário.
+        PRÓPRIA window: centralizado nela e alinhado com sua rotação.
+        Depois desta conversão, a window sempre vira um retângulo
+        alinhado aos eixos (de -largura/2 a largura/2, de -altura/2 a
+        altura/2), independente de estar rotacionada no mundo ou não
+        -- e é exatamente por isso que fazemos o clipping aqui: os
+        algoritmos clássicos de clipping assumem uma janela retangular
+        alinhada aos eixos.
         """
         x, y = ponto_mundo
         dx = x - self.centro_x
@@ -110,14 +95,20 @@ class Window:
         ly = dx * sin_a + dy * cos_a
         return lx, ly
 
+    def limites_locais(self):
+        """(xmin, xmax, ymin, ymax) do retângulo da window no seu
+        próprio referencial local -- sempre centrado em (0,0)."""
+        meia_largura = self.largura / 2
+        meia_altura = self.altura / 2
+        return -meia_largura, meia_largura, -meia_altura, meia_altura
+
 
 # VIEWPORT
 #
-# Converte um ponto do MUNDO (já passado pelo referencial local da
-# window) para coordenadas de tela (pixels no canvas). Como o ponto
-# chega centralizado em (0,0) e alinhado com a window, o mapeamento
-# fica simétrico em torno do centro do canvas -- não precisamos mais
-# saber "onde" a window está no mundo aqui, só o quanto ela mede.
+# Mapeia um ponto já em coordenadas LOCAIS da window (centralizado,
+# alinhado) para pixels de tela. Não faz mais o passo mundo->local
+# sozinho -- isso é feito separadamente ANTES do clipping, e o
+# clipping acontece justamente entre esses dois passos.
 
 class Viewport:
     def __init__(self, largura_tela, altura_tela, margem=20):
@@ -125,31 +116,208 @@ class Viewport:
         self.altura_tela = altura_tela
         self.margem = margem
 
-    def transformar(self, ponto_mundo, window: Window):
-        local_x, local_y = window.mundo_para_local(ponto_mundo)
+    def local_para_tela(self, ponto_local, window: Window):
+        local_x, local_y = ponto_local
 
         area_util_x = self.largura_tela - 2 * self.margem
         area_util_y = self.altura_tela - 2 * self.margem
 
-        # Mesma escala nos dois eixos -> não distorce o objeto
         escala = min(area_util_x / window.largura, area_util_y / window.altura)
 
         centro_tela_x = self.margem + area_util_x / 2
         centro_tela_y = self.margem + area_util_y / 2
 
         x_tela = centro_tela_x + local_x * escala
-        # Eixo Y da tela cresce para baixo -> por isso o sinal invertido
-        y_tela = centro_tela_y - local_y * escala
+        y_tela = centro_tela_y - local_y * escala  # eixo Y da tela cresce pra baixo
 
         return x_tela, y_tela
 
+    def transformar(self, ponto_mundo, window: Window):
+        """Atalho mundo -> tela direto, sem clipping. Usado só onde
+        clipping não se aplica (ex: nada, hoje -- fica aqui de bônus)."""
+        return self.local_para_tela(window.mundo_para_local(ponto_mundo), window)
 
-# TRANSFORMAÇÕES 2D EM COORDENADAS HOMOGÊNEAS (herdadas do T1.2)
+
+# CLIPPING
 #
-# Continuam operando inteiramente em coordenadas do MUNDO. Por isso
-# a rotação da window não interfere nelas: transformar um objeto
-# funciona exatamente igual, esteja a window rotacionada ou não --
-# só o desenho final na tela é que muda.
+# Todas as funções abaixo trabalham em coordenadas LOCAIS da window
+# (já alinhadas aos eixos), recebendo os limites (xmin, xmax, ymin,
+# ymax) do retângulo de clipping.
+
+def ponto_dentro_da_window(ponto, xmin, xmax, ymin, ymax):
+    x, y = ponto
+    return xmin <= x <= xmax and ymin <= y <= ymax
+
+
+# --- Cohen-Sutherland ---
+# Cada ponto recebe um "código de região" de 4 bits, indicando de
+# quais lados do retângulo ele está fora (esquerda/direita/baixo/
+# cima). Se os dois códigos forem 0, a reta está inteira dentro; se
+# o "and" bit a bit dos dois códigos não for 0, os dois pontos estão
+# fora do MESMO lado, então a reta inteira pode ser rejeitada. Caso
+# contrário, recorta contra a borda indicada e repete.
+
+ESQUERDA, DIREITA, ABAIXO, ACIMA = 1, 2, 4, 8
+
+
+def _codigo_regiao(ponto, xmin, xmax, ymin, ymax):
+    x, y = ponto
+    codigo = 0
+    if x < xmin:
+        codigo |= ESQUERDA
+    elif x > xmax:
+        codigo |= DIREITA
+    if y < ymin:
+        codigo |= ABAIXO
+    elif y > ymax:
+        codigo |= ACIMA
+    return codigo
+
+
+def clipar_reta_cohen_sutherland(p1, p2, xmin, xmax, ymin, ymax):
+    x1, y1 = p1
+    x2, y2 = p2
+    codigo1 = _codigo_regiao((x1, y1), xmin, xmax, ymin, ymax)
+    codigo2 = _codigo_regiao((x2, y2), xmin, xmax, ymin, ymax)
+
+    while True:
+        if codigo1 == 0 and codigo2 == 0:
+            return (x1, y1), (x2, y2)  # os dois pontos estão dentro
+        if codigo1 & codigo2 != 0:
+            return None  # os dois estão fora do mesmo lado -> descarta
+
+        codigo_fora = codigo1 if codigo1 != 0 else codigo2
+
+        if codigo_fora & ACIMA:
+            x = x1 + (x2 - x1) * (ymax - y1) / (y2 - y1)
+            y = ymax
+        elif codigo_fora & ABAIXO:
+            x = x1 + (x2 - x1) * (ymin - y1) / (y2 - y1)
+            y = ymin
+        elif codigo_fora & DIREITA:
+            y = y1 + (y2 - y1) * (xmax - x1) / (x2 - x1)
+            x = xmax
+        else:  # ESQUERDA
+            y = y1 + (y2 - y1) * (xmin - x1) / (x2 - x1)
+            x = xmin
+
+        if codigo_fora == codigo1:
+            x1, y1 = x, y
+            codigo1 = _codigo_regiao((x1, y1), xmin, xmax, ymin, ymax)
+        else:
+            x2, y2 = x, y
+            codigo2 = _codigo_regiao((x2, y2), xmin, xmax, ymin, ymax)
+
+
+# --- Liang-Barsky ---
+# Trata a reta em forma paramétrica P(t) = P1 + t*(P2-P1), t em
+# [0,1], e vai estreitando o intervalo [t0,t1] contra cada uma das
+# 4 bordas do retângulo. Se o intervalo fechar (t0 > t1), a reta
+# está inteiramente fora.
+
+def clipar_reta_liang_barsky(p1, p2, xmin, xmax, ymin, ymax):
+    x1, y1 = p1
+    x2, y2 = p2
+    dx = x2 - x1
+    dy = y2 - y1
+
+    t0, t1 = 0.0, 1.0
+    # cada item é (p, q): a borda impõe p*t <= q
+    bordas = ((-dx, x1 - xmin), (dx, xmax - x1), (-dy, y1 - ymin), (dy, ymax - y1))
+
+    for p, q in bordas:
+        if p == 0:
+            if q < 0:
+                return None  # reta paralela a essa borda e do lado de fora
+            continue
+
+        r = q / p
+        if p < 0:
+            if r > t1:
+                return None
+            t0 = max(t0, r)
+        else:
+            if r < t0:
+                return None
+            t1 = min(t1, r)
+
+    if t0 > t1:
+        return None
+
+    novo_p1 = (x1 + t0 * dx, y1 + t0 * dy)
+    novo_p2 = (x1 + t1 * dx, y1 + t1 * dy)
+    return novo_p1, novo_p2
+
+
+# --- Sutherland-Hodgman (clipping de polígono) ---
+# Recorta o polígono contra uma borda do retângulo por vez (esquerda,
+# direita, baixo, cima), indo de todas as 4. Em cada passagem, para
+# cada aresta do polígono atual, decide se mantém o ponto, adiciona
+# uma intersecção com a borda, ou descarta -- e o resultado de uma
+# borda alimenta a próxima.
+
+def _intersecao_com_borda(p1, p2, borda, xmin, xmax, ymin, ymax):
+    x1, y1 = p1
+    x2, y2 = p2
+    if borda == "esquerda":
+        x = xmin
+        y = y1 + (y2 - y1) * (xmin - x1) / (x2 - x1)
+    elif borda == "direita":
+        x = xmax
+        y = y1 + (y2 - y1) * (xmax - x1) / (x2 - x1)
+    elif borda == "baixo":
+        y = ymin
+        x = x1 + (x2 - x1) * (ymin - y1) / (y2 - y1)
+    else:  # "cima"
+        y = ymax
+        x = x1 + (x2 - x1) * (ymax - y1) / (y2 - y1)
+    return (x, y)
+
+
+def _dentro_da_borda(ponto, borda, xmin, xmax, ymin, ymax):
+    x, y = ponto
+    if borda == "esquerda":
+        return x >= xmin
+    if borda == "direita":
+        return x <= xmax
+    if borda == "baixo":
+        return y >= ymin
+    return y <= ymax  # "cima"
+
+
+def _recortar_por_uma_borda(pontos, borda, xmin, xmax, ymin, ymax):
+    if not pontos:
+        return []
+
+    saida = []
+    n = len(pontos)
+    for i in range(n):
+        atual = pontos[i]
+        anterior = pontos[i - 1]
+        atual_dentro = _dentro_da_borda(atual, borda, xmin, xmax, ymin, ymax)
+        anterior_dentro = _dentro_da_borda(anterior, borda, xmin, xmax, ymin, ymax)
+
+        if atual_dentro:
+            if not anterior_dentro:
+                saida.append(_intersecao_com_borda(anterior, atual, borda, xmin, xmax, ymin, ymax))
+            saida.append(atual)
+        elif anterior_dentro:
+            saida.append(_intersecao_com_borda(anterior, atual, borda, xmin, xmax, ymin, ymax))
+
+    return saida
+
+
+def clipar_poligono_sutherland_hodgman(pontos, xmin, xmax, ymin, ymax):
+    resultado = pontos
+    for borda in ("esquerda", "direita", "baixo", "cima"):
+        resultado = _recortar_por_uma_borda(resultado, borda, xmin, xmax, ymin, ymax)
+    return resultado
+
+
+# TRANSFORMAÇÕES 2D EM COORDENADAS HOMOGÊNEAS (herdadas das entregas anteriores)
+#
+# Continuam operando inteiramente em coordenadas do MUNDO -- não são
+# afetadas por rotação da window nem por clipping.
 
 def matriz_identidade():
     return ((1, 0, 0), (0, 1, 0), (0, 0, 1))
@@ -220,24 +388,15 @@ def matriz_rotacao_ponto_arbitrario(px, py, graus):
     )
 
 
-# LEITURA E ESCRITA DE ARQUIVOS .OBJ (Wavefront)
-#
-# O formato OBJ numera vértices GLOBALMENTE (1, 2, 3, ... ao longo
-# de todo o arquivo, não por objeto). O DescritorOBJ sabe transcrever
-# UM objeto para linhas de texto .obj, desde que a gente informe em
-# qual índice global os vértices dele começam.
-#
-# Guardamos tipo e cor como comentários (linhas com "#"), já que o
-# formato OBJ puro não tem esses campos -- assim conseguimos
-# recuperá-los na leitura sem perder informação.
+# LEITURA E ESCRITA DE ARQUIVOS .OBJ (herdadas da entrega anterior)
 
 class DescritorOBJ:
     def descrever(self, objeto, indice_inicial):
-        """Devolve (linhas_de_texto, quantidade_de_vertices_usados)."""
         linhas = [
             f"o {objeto.nome}",
             f"# tipo {objeto.tipo}",
             f"# cor {objeto.cor}",
+            f"# preenchido {objeto.preenchido}",
         ]
         for x, y in objeto.coordenadas:
             linhas.append(f"v {x} {y} 0.0")
@@ -249,7 +408,6 @@ class DescritorOBJ:
         elif objeto.tipo == "reta":
             linhas.append(f"l {indices[0]} {indices[1]}")
         elif objeto.tipo == "wireframe":
-            # fecha o polígono citando o primeiro índice de novo no final
             sequencia = " ".join(str(i) for i in indices + [indices[0]])
             linhas.append(f"l {sequencia}")
 
@@ -257,7 +415,6 @@ class DescritorOBJ:
 
 
 def salvar_mundo_obj(display_file, caminho):
-    """Percorre o display file e escreve todo o mundo num único .obj."""
     descritor = DescritorOBJ()
     linhas = ["# Mundo gerado pelo Sistema Gráfico Interativo"]
     proximo_indice = 1
@@ -272,11 +429,6 @@ def salvar_mundo_obj(display_file, caminho):
 
 
 def carregar_mundo_obj(caminho):
-    """
-    Lê um .obj (no formato escrito por salvar_mundo_obj) e devolve uma
-    lista de tuplas (nome, tipo, coordenadas, cor), prontas para
-    alimentar DisplayFile.adicionar.
-    """
     vertices_globais = []
     objetos_lidos = []
     atual = None
@@ -290,7 +442,10 @@ def carregar_mundo_obj(caminho):
             if linha.startswith("o "):
                 if atual is not None:
                     objetos_lidos.append(atual)
-                atual = {"nome": linha[2:].strip(), "tipo": "wireframe", "cor": "#000000", "indices": []}
+                atual = {
+                    "nome": linha[2:].strip(), "tipo": "wireframe",
+                    "cor": "#000000", "preenchido": False, "indices": [],
+                }
 
             elif linha.startswith("# tipo "):
                 if atual is not None:
@@ -300,6 +455,10 @@ def carregar_mundo_obj(caminho):
                 if atual is not None:
                     atual["cor"] = linha[len("# cor "):].strip()
 
+            elif linha.startswith("# preenchido "):
+                if atual is not None:
+                    atual["preenchido"] = linha[len("# preenchido "):].strip() == "True"
+
             elif linha.startswith("v "):
                 _, x, y, _z = linha.split()
                 vertices_globais.append((float(x), float(y)))
@@ -307,7 +466,7 @@ def carregar_mundo_obj(caminho):
             elif linha.startswith(("p ", "l ", "f ")):
                 if atual is not None:
                     partes = linha.split()[1:]
-                    atual["indices"] = [int(p) - 1 for p in partes]  # obj é 1-based
+                    atual["indices"] = [int(p) - 1 for p in partes]
 
         if atual is not None:
             objetos_lidos.append(atual)
@@ -315,18 +474,15 @@ def carregar_mundo_obj(caminho):
     resultado = []
     for info in objetos_lidos:
         indices = info["indices"]
-        # wireframe foi salvo com o índice inicial repetido no final
-        # para fechar o polígono -- removemos a repetição, já que o
-        # desenho já fecha o polígono sozinho
         if info["tipo"] == "wireframe" and len(indices) > 1 and indices[0] == indices[-1]:
             indices = indices[:-1]
         coordenadas = [vertices_globais[i] for i in indices]
-        resultado.append((info["nome"], info["tipo"], coordenadas, info["cor"]))
+        resultado.append((info["nome"], info["tipo"], coordenadas, info["cor"], info["preenchido"]))
 
     return resultado
 
 
-# JANELA DE TRANSFORMAÇÕES (herdada do T1.2)
+# JANELA DE TRANSFORMAÇÕES (herdada das entregas anteriores)
 
 class JanelaTransformacao(tk.Toplevel):
     def __init__(self, raiz, objeto, ao_aplicar):
@@ -499,7 +655,11 @@ class Aplicacao:
 
         self.display_file = DisplayFile()
         self.window = Window(centro_x=0, centro_y=0, largura=200, altura=200)
-        self.viewport = Viewport(self.LARGURA_CANVAS, self.ALTURA_CANVAS)
+        # margem grande de propósito: a viewport fica visivelmente
+        # menor que o canvas, com uma moldura entre as duas -- assim,
+        # se o clipping falhar, o objeto "vaza" pra fora da moldura e
+        # o erro fica óbvio (sugestão do próprio enunciado).
+        self.viewport = Viewport(self.LARGURA_CANVAS, self.ALTURA_CANVAS, margem=40)
         self.cor_selecionada = "#000000"
 
         self._montar_interface()
@@ -520,7 +680,7 @@ class Aplicacao:
 
         # Lista de objetos existentes
         tk.Label(painel, text="Objetos").pack(anchor="w")
-        self.lista_objetos = tk.Listbox(painel, width=30, height=8)
+        self.lista_objetos = tk.Listbox(painel, width=32, height=8)
         self.lista_objetos.pack()
 
         tk.Button(
@@ -532,7 +692,7 @@ class Aplicacao:
         tk.Label(painel, text="Novo objeto").pack(anchor="w", pady=(15, 0))
 
         tk.Label(painel, text="Nome:").pack(anchor="w")
-        self.entrada_nome = tk.Entry(painel, width=30)
+        self.entrada_nome = tk.Entry(painel, width=32)
         self.entrada_nome.pack()
 
         tk.Label(painel, text="Tipo:").pack(anchor="w")
@@ -542,7 +702,7 @@ class Aplicacao:
         ).pack(anchor="w")
 
         tk.Label(painel, text="Coordenadas (ex: (10,10),(50,50)):").pack(anchor="w")
-        self.entrada_coordenadas = tk.Entry(painel, width=30)
+        self.entrada_coordenadas = tk.Entry(painel, width=32)
         self.entrada_coordenadas.pack()
 
         frame_cor = tk.Frame(painel)
@@ -550,6 +710,12 @@ class Aplicacao:
         tk.Button(frame_cor, text="Escolher cor", command=self._escolher_cor).pack(side="left")
         self.amostra_cor = tk.Label(frame_cor, text="   ", bg=self.cor_selecionada, relief="sunken")
         self.amostra_cor.pack(side="left", padx=5)
+
+        self.preenchido_selecionado = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            painel, text="Preenchido (só afeta wireframe)",
+            variable=self.preenchido_selecionado,
+        ).pack(anchor="w", pady=(5, 0))
 
         tk.Button(
             painel, text="Adicionar objeto", command=self._adicionar_objeto
@@ -585,6 +751,18 @@ class Aplicacao:
         ).grid(row=0, column=2, padx=5)
         self.label_angulo_atual = tk.Label(painel, text="Ângulo atual: 0°")
         self.label_angulo_atual.pack(anchor="w")
+
+        # Técnica de clipping de retas
+        tk.Label(painel, text="Clipping de retas").pack(anchor="w", pady=(15, 0))
+        self.tecnica_clip_reta = tk.StringVar(value="cohen_sutherland")
+        tk.Radiobutton(
+            painel, text="Cohen-Sutherland", variable=self.tecnica_clip_reta,
+            value="cohen_sutherland", command=self._redesenhar,
+        ).pack(anchor="w")
+        tk.Radiobutton(
+            painel, text="Liang-Barsky", variable=self.tecnica_clip_reta,
+            value="liang_barsky", command=self._redesenhar,
+        ).pack(anchor="w")
 
         # Arquivo .obj
         tk.Label(painel, text="Arquivo .obj").pack(anchor="w", pady=(15, 0))
@@ -628,11 +806,9 @@ class Aplicacao:
             messagebox.showerror("Erro", "Um wireframe precisa de pelo menos 3 coordenadas.")
             return
 
-        # As coordenadas digitadas aqui são sempre em coordenadas do
-        # MUNDO, então não importa se a window está rotacionada ou
-        # não nesse momento -- o objeto novo aparece na tela seguindo
-        # a mesma rotação de todos os outros automaticamente.
-        self.display_file.adicionar(nome, tipo, coordenadas, self.cor_selecionada)
+        self.display_file.adicionar(
+            nome, tipo, coordenadas, self.cor_selecionada, self.preenchido_selecionado.get()
+        )
         self.entrada_nome.delete(0, tk.END)
         self.entrada_coordenadas.delete(0, tk.END)
         self._redesenhar()
@@ -699,8 +875,8 @@ class Aplicacao:
             return
 
         self.display_file.limpar()
-        for nome, tipo, coordenadas, cor in objetos_lidos:
-            self.display_file.adicionar(nome, tipo, coordenadas, cor)
+        for nome, tipo, coordenadas, cor, preenchido in objetos_lidos:
+            self.display_file.adicionar(nome, tipo, coordenadas, cor, preenchido)
         self._redesenhar()
 
     # Desenho
@@ -709,19 +885,54 @@ class Aplicacao:
         self.lista_objetos.delete(0, tk.END)
         self.label_angulo_atual.config(text=f"Ângulo atual: {self.window.angulo % 360:.1f}°")
 
+        self._desenhar_moldura_viewport()
+
+        xmin, xmax, ymin, ymax = self.window.limites_locais()
+        usar_liang_barsky = self.tecnica_clip_reta.get() == "liang_barsky"
+
         for objeto in self.display_file.objetos:
             self.lista_objetos.insert(tk.END, repr(objeto))
-            pontos_tela = [
-                self.viewport.transformar(p, self.window)
-                for p in objeto.coordenadas
-            ]
 
+            # 1) mundo -> local da window (ainda sem cortar nada)
+            pontos_locais = [self.window.mundo_para_local(p) for p in objeto.coordenadas]
+
+            # 2) clipping, específico por tipo de objeto
             if objeto.tipo == "ponto":
-                self._desenhar_ponto(pontos_tela[0], objeto.cor)
+                if ponto_dentro_da_window(pontos_locais[0], xmin, xmax, ymin, ymax):
+                    p_tela = self.viewport.local_para_tela(pontos_locais[0], self.window)
+                    self._desenhar_ponto(p_tela, objeto.cor)
+
             elif objeto.tipo == "reta":
-                self._desenhar_linha(pontos_tela[0], pontos_tela[1], objeto.cor)
+                if usar_liang_barsky:
+                    resultado = clipar_reta_liang_barsky(pontos_locais[0], pontos_locais[1], xmin, xmax, ymin, ymax)
+                else:
+                    resultado = clipar_reta_cohen_sutherland(pontos_locais[0], pontos_locais[1], xmin, xmax, ymin, ymax)
+
+                if resultado is not None:
+                    p1_tela = self.viewport.local_para_tela(resultado[0], self.window)
+                    p2_tela = self.viewport.local_para_tela(resultado[1], self.window)
+                    self._desenhar_linha(p1_tela, p2_tela, objeto.cor)
+
             elif objeto.tipo == "wireframe":
-                self._desenhar_wireframe(pontos_tela, objeto.cor)
+                poligono_clipado = clipar_poligono_sutherland_hodgman(pontos_locais, xmin, xmax, ymin, ymax)
+                if len(poligono_clipado) >= 2:
+                    # 3) só o resultado do clipping passa pela viewport
+                    pontos_tela = [self.viewport.local_para_tela(p, self.window) for p in poligono_clipado]
+                    if objeto.preenchido and len(pontos_tela) >= 3:
+                        self._desenhar_wireframe_preenchido(pontos_tela, objeto.cor)
+                    else:
+                        self._desenhar_wireframe(pontos_tela, objeto.cor)
+
+    def _desenhar_moldura_viewport(self):
+        """Desenha o retângulo exato onde a window (já mapeada pra
+        tela) deveria terminar. Serve como referência visual: se o
+        clipping estiver certo, nada deveria aparecer fora dela."""
+        xmin, xmax, ymin, ymax = self.window.limites_locais()
+        cantos_locais = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+        cantos_tela = [self.viewport.local_para_tela(c, self.window) for c in cantos_locais]
+        xs = [c[0] for c in cantos_tela]
+        ys = [c[1] for c in cantos_tela]
+        self.canvas.create_rectangle(min(xs), min(ys), max(xs), max(ys), outline="gray50")
 
     def _desenhar_ponto(self, ponto, cor, tamanho=3):
         x, y = ponto
@@ -737,6 +948,12 @@ class Aplicacao:
             p1 = pontos[i]
             p2 = pontos[(i + 1) % n]
             self.canvas.create_line(p1[0], p1[1], p2[0], p2[1], fill=cor)
+
+    def _desenhar_wireframe_preenchido(self, pontos, cor):
+        coordenadas_planas = []
+        for x, y in pontos:
+            coordenadas_planas.extend((x, y))
+        self.canvas.create_polygon(*coordenadas_planas, fill=cor, outline=cor)
 
 
 if __name__ == "__main__":
