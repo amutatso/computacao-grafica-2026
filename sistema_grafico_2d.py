@@ -388,6 +388,84 @@ def matriz_rotacao_ponto_arbitrario(px, py, graus):
     )
 
 
+# CURVAS DE BÉZIER (via Forward Differences)
+#
+# Uma curva de Bézier composta é definida por 3n+1 pontos de
+# controle: o 1º segmento usa os pontos 0,1,2,3; o 2º usa 3,4,5,6
+# (reaproveitando o ponto 3); e assim por diante. Reaproveitar o
+# último ponto de um segmento como primeiro do próximo garante
+# continuidade G(0) -- a curva não tem "buracos" entre segmentos.
+#
+# Cada segmento (4 pontos) é transformado em uma sequência de
+# pequenos pontos ao longo da curva usando forward differences --
+# a mesma técnica já usada no exercício da B-spline, só trocando a
+# matriz do método (aqui, a matriz de Bézier).
+
+def matriz_bezier():
+    return ((-1, 3, -3, 1), (3, -6, 3, 0), (-3, 3, 0, 0), (1, 0, 0, 0))
+
+
+def _matriz_diferencas(delta):
+    """E(delta), tal que D = E(delta) . C, onde D = [f0, Δf0, Δ²f0, Δ³f0]."""
+    return (
+        (0, 0, 0, 1),
+        (delta ** 3, delta ** 2, delta, 0),
+        (6 * delta ** 3, 2 * delta ** 2, 0, 0),
+        (6 * delta ** 3, 0, 0, 0),
+    )
+
+
+def _multiplicar_matriz4_vetor4(matriz, vetor):
+    return [sum(matriz[i][j] * vetor[j] for j in range(4)) for i in range(4)]
+
+
+def gerar_pontos_bezier(p0, p1, p2, p3, passos=20):
+    """Gera os pontos de UM segmento de Bézier (4 pontos de controle),
+    usando forward differences, para x e y separadamente."""
+    delta = 1 / passos
+    M = matriz_bezier()
+    E = _matriz_diferencas(delta)
+
+    Gx = [p0[0], p1[0], p2[0], p3[0]]
+    Gy = [p0[1], p1[1], p2[1], p3[1]]
+
+    Cx = _multiplicar_matriz4_vetor4(M, Gx)
+    Cy = _multiplicar_matriz4_vetor4(M, Gy)
+
+    Dx = _multiplicar_matriz4_vetor4(E, Cx)  # [f0, Δf0, Δ²f0, Δ³f0] em x
+    Dy = _multiplicar_matriz4_vetor4(E, Cy)  # idem em y
+
+    x, dx, d2x, d3x = Dx
+    y, dy, d2y, d3y = Dy
+
+    pontos = [(x, y)]
+    for _ in range(passos):
+        x += dx;  dx += d2x;  d2x += d3x
+        y += dy;  dy += d2y;  d2y += d3y
+        pontos.append((x, y))
+    return pontos
+
+
+def gerar_curva_bezier_composta(pontos_controle, passos_por_segmento=20):
+    """
+    pontos_controle: lista com 3n+1 pontos (n segmentos). Devolve a
+    lista de pontos de TODA a curva, já concatenada -- pronta para
+    ser tratada como uma polilinha (útil tanto para desenhar quanto
+    para clipar, reaproveitando o clip de reta já existente).
+    """
+    n_segmentos = (len(pontos_controle) - 1) // 3
+    pontos_curva = []
+
+    for i in range(n_segmentos):
+        p0, p1, p2, p3 = pontos_controle[3 * i: 3 * i + 4]
+        segmento = gerar_pontos_bezier(p0, p1, p2, p3, passos_por_segmento)
+        if i > 0:
+            segmento = segmento[1:]  # evita repetir o ponto de junção
+        pontos_curva.extend(segmento)
+
+    return pontos_curva
+
+
 # LEITURA E ESCRITA DE ARQUIVOS .OBJ (herdadas da entrega anterior)
 
 class DescritorOBJ:
@@ -409,6 +487,12 @@ class DescritorOBJ:
             linhas.append(f"l {indices[0]} {indices[1]}")
         elif objeto.tipo == "wireframe":
             sequencia = " ".join(str(i) for i in indices + [indices[0]])
+            linhas.append(f"l {sequencia}")
+        elif objeto.tipo == "curva":
+            # salva os PONTOS DE CONTROLE (não os pontos gerados pela
+            # curva) -- ao carregar de volta, a curva é regenerada a
+            # partir deles.
+            sequencia = " ".join(str(i) for i in indices)
             linhas.append(f"l {sequencia}")
 
         return linhas, len(objeto.coordenadas)
@@ -698,10 +782,13 @@ class Aplicacao:
         tk.Label(painel, text="Tipo:").pack(anchor="w")
         self.tipo_selecionado = tk.StringVar(value="ponto")
         tk.OptionMenu(
-            painel, self.tipo_selecionado, "ponto", "reta", "wireframe"
+            painel, self.tipo_selecionado, "ponto", "reta", "wireframe", "curva"
         ).pack(anchor="w")
 
-        tk.Label(painel, text="Coordenadas (ex: (10,10),(50,50)):").pack(anchor="w")
+        tk.Label(
+            painel,
+            text="Coordenadas. Curva: 3n+1 pontos (4, 7, 10...)",
+        ).pack(anchor="w")
         self.entrada_coordenadas = tk.Entry(painel, width=32)
         self.entrada_coordenadas.pack()
 
@@ -804,6 +891,12 @@ class Aplicacao:
             return
         if tipo == "wireframe" and len(coordenadas) < 3:
             messagebox.showerror("Erro", "Um wireframe precisa de pelo menos 3 coordenadas.")
+            return
+        if tipo == "curva" and (len(coordenadas) < 4 or (len(coordenadas) - 1) % 3 != 0):
+            messagebox.showerror(
+                "Erro",
+                "Uma curva precisa de 3n+1 pontos (4 para 1 segmento, 7 para 2, 10 para 3...).",
+            )
             return
 
         self.display_file.adicionar(
@@ -922,6 +1015,29 @@ class Aplicacao:
                         self._desenhar_wireframe_preenchido(pontos_tela, objeto.cor)
                     else:
                         self._desenhar_wireframe(pontos_tela, objeto.cor)
+
+            elif objeto.tipo == "curva":
+                # gera a curva (já em coordenadas locais, a partir dos
+                # pontos de controle transformados) como uma sequência
+                # de pontos -- ou seja, uma polilinha
+                pontos_curva = gerar_curva_bezier_composta(pontos_locais, passos_por_segmento=20)
+
+                # clipa cada pequeno segmento da polilinha com a MESMA
+                # técnica de clip de reta já usada para objetos "reta"
+                # -- é assim que o material da disciplina recomenda:
+                # recorte de curva = recorte de linha aplicado durante
+                # o desenho da curva, já que ela é um modelo de arame
+                for i in range(len(pontos_curva) - 1):
+                    p1, p2 = pontos_curva[i], pontos_curva[i + 1]
+                    if usar_liang_barsky:
+                        resultado = clipar_reta_liang_barsky(p1, p2, xmin, xmax, ymin, ymax)
+                    else:
+                        resultado = clipar_reta_cohen_sutherland(p1, p2, xmin, xmax, ymin, ymax)
+
+                    if resultado is not None:
+                        p1_tela = self.viewport.local_para_tela(resultado[0], self.window)
+                        p2_tela = self.viewport.local_para_tela(resultado[1], self.window)
+                        self._desenhar_linha(p1_tela, p2_tela, objeto.cor)
 
     def _desenhar_moldura_viewport(self):
         """Desenha o retângulo exato onde a window (já mapeada pra
