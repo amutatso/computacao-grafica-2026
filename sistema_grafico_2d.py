@@ -388,6 +388,23 @@ def matriz_rotacao_ponto_arbitrario(px, py, graus):
     )
 
 
+# FERRAMENTAS COMPARTILHADAS ENTRE BEZIER E B-SPLINE
+#
+# Essas duas não dependem do método, servem pra qualquer curva
+# definida por 4 pontos de controle e uma matriz M.
+def _matriz_diferencas(delta):
+    """E(delta), tal que D = E(delta) . C, onde D = [f0, Δf0, Δ²f0, Δ³f0]."""
+    return (
+        (0, 0, 0, 1),
+        (delta ** 3, delta ** 2, delta, 0),
+        (6 * delta ** 3, 2 * delta ** 2, 0, 0),
+        (6 * delta ** 3, 0, 0, 0),
+    )
+
+
+def _multiplicar_matriz4_vetor4(matriz, vetor):
+    return [sum(matriz[i][j] * vetor[j] for j in range(4)) for i in range(4)]
+
 # CURVAS DE BÉZIER (via Forward Differences)
 #
 # Uma curva de Bézier composta é definida por 3n+1 pontos de
@@ -404,19 +421,6 @@ def matriz_rotacao_ponto_arbitrario(px, py, graus):
 def matriz_bezier():
     return ((-1, 3, -3, 1), (3, -6, 3, 0), (-3, 3, 0, 0), (1, 0, 0, 0))
 
-
-def _matriz_diferencas(delta):
-    """E(delta), tal que D = E(delta) . C, onde D = [f0, Δf0, Δ²f0, Δ³f0]."""
-    return (
-        (0, 0, 0, 1),
-        (delta ** 3, delta ** 2, delta, 0),
-        (6 * delta ** 3, 2 * delta ** 2, 0, 0),
-        (6 * delta ** 3, 0, 0, 0),
-    )
-
-
-def _multiplicar_matriz4_vetor4(matriz, vetor):
-    return [sum(matriz[i][j] * vetor[j] for j in range(4)) for i in range(4)]
 
 
 def gerar_pontos_bezier(p0, p1, p2, p3, passos=20):
@@ -466,6 +470,59 @@ def gerar_curva_bezier_composta(pontos_controle, passos_por_segmento=20):
     return pontos_curva
 
 
+
+# B-Splines utilizando Forward Differences
+def matriz_bspline():
+    return ((-1/6, 3/6, -3/6, 1/6), (3/6, -6/6, 3/6, 0/6), (-3/6, 0/6, 3/6, 0/6), (1/6, 4/6, 1/6, 0/6))
+
+
+
+def gerar_pontos_bspline(p0, p1, p2, p3, passos=20):
+    """
+    Gera os pontos de UM segmento de B-spline (4 pontos de controle),
+    usando forward differences, para x e y separadamente.
+    """
+    delta = 1 / passos
+    M = matriz_bspline()
+    E = _matriz_diferencas(delta)
+
+    Gx = [p0[0], p1[0], p2[0], p3[0]]
+    Gy = [p0[1], p1[1], p2[1], p3[1]]
+
+    Cx = _multiplicar_matriz4_vetor4(M, Gx)
+    Cy = _multiplicar_matriz4_vetor4(M, Gy)
+
+    Dx = _multiplicar_matriz4_vetor4(E, Cx)  # [f0, Δf0, Δ²f0, Δ³f0] em x
+    Dy = _multiplicar_matriz4_vetor4(E, Cy)  # idem em y
+
+    x, dx, d2x, d3x = Dx
+    y, dy, d2y, d3y = Dy
+
+    pontos = [(x, y)]
+    for _ in range(passos):
+        x += dx;  dx += d2x;  d2x += d3x
+        y += dy;  dy += d2y;  d2y += d3y
+        pontos.append((x, y))
+    return pontos
+
+
+def gerar_bspline(pontos_controle, passos_por_segmento=20):
+    """
+    pontos_controle: lista com 4 ou mais pontos. Devolve a lista de
+    pontos de TODA a curva, já concatenada.
+    """
+    pontos_curva = []
+
+    for i in range(3, len(pontos_controle)):
+        p0, p1, p2, p3 = pontos_controle[i - 3: i + 1]
+        segmento = gerar_pontos_bspline(p0, p1, p2, p3, passos_por_segmento)
+        if i > 3:
+            segmento = segmento[1:]  # evita repetir o ponto de junção
+        pontos_curva.extend(segmento)
+
+    return pontos_curva
+
+
 # LEITURA E ESCRITA DE ARQUIVOS .OBJ (herdadas da entrega anterior)
 
 class DescritorOBJ:
@@ -494,8 +551,15 @@ class DescritorOBJ:
             # partir deles.
             sequencia = " ".join(str(i) for i in indices)
             linhas.append(f"l {sequencia}")
+        elif objeto.tipo == "bspline":
+            # salva os PONTOS DE CONTROLE
+            # -- ao carregar de volta, a curva é regenerada a
+            # partir deles.
+            sequencia = " ".join(str(i) for i in indices)
+            linhas.append(f"l {sequencia}")
 
         return linhas, len(objeto.coordenadas)
+
 
 
 def salvar_mundo_obj(display_file, caminho):
@@ -782,7 +846,7 @@ class Aplicacao:
         tk.Label(painel, text="Tipo:").pack(anchor="w")
         self.tipo_selecionado = tk.StringVar(value="ponto")
         tk.OptionMenu(
-            painel, self.tipo_selecionado, "ponto", "reta", "wireframe", "curva"
+            painel, self.tipo_selecionado, "ponto", "reta", "wireframe", "curva", "bspline"
         ).pack(anchor="w")
 
         tk.Label(
@@ -898,6 +962,14 @@ class Aplicacao:
                 "Uma curva precisa de 3n+1 pontos (4 para 1 segmento, 7 para 2, 10 para 3...).",
             )
             return
+        if tipo == "bspline" and len(coordenadas) < 4:
+            messagebox.showerror(
+                "Erro",
+                "Uma B-spline precisa de pelo menos 4 pontos de controle.",
+            )
+            return
+        
+        
 
         self.display_file.adicionar(
             nome, tipo, coordenadas, self.cor_selecionada, self.preenchido_selecionado.get()
@@ -1027,6 +1099,29 @@ class Aplicacao:
                 # -- é assim que o material da disciplina recomenda:
                 # recorte de curva = recorte de linha aplicado durante
                 # o desenho da curva, já que ela é um modelo de arame
+                for i in range(len(pontos_curva) - 1):
+                    p1, p2 = pontos_curva[i], pontos_curva[i + 1]
+                    if usar_liang_barsky:
+                        resultado = clipar_reta_liang_barsky(p1, p2, xmin, xmax, ymin, ymax)
+                    else:
+                        resultado = clipar_reta_cohen_sutherland(p1, p2, xmin, xmax, ymin, ymax)
+
+                    if resultado is not None:
+                        p1_tela = self.viewport.local_para_tela(resultado[0], self.window)
+                        p2_tela = self.viewport.local_para_tela(resultado[1], self.window)
+                        self._desenhar_linha(p1_tela, p2_tela, objeto.cor)
+                        
+            elif objeto.tipo == "bspline":
+                # gera a B-spline (já em coordenadas locais, a partir dos
+                # pontos de controle transformados) como uma sequência
+                # de pontos -- ou seja, uma polilinha
+                pontos_curva = gerar_bspline(pontos_locais, passos_por_segmento=20)
+
+                # clipa cada pequeno segmento da polilinha com a MESMA
+                # técnica de clip de reta já usada para objetos "reta"
+                # -- é assim que o material da disciplina recomenda:
+                # recorte de bspline = recorte de linha aplicado durante
+                # o desenho da bspline, já que ela é um modelo de arame
                 for i in range(len(pontos_curva) - 1):
                     p1, p2 = pontos_curva[i], pontos_curva[i + 1]
                     if usar_liang_barsky:
