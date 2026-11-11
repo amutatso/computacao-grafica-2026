@@ -29,6 +29,11 @@ class DisplayFile:
 
     def __init__(self):
         self.objetos = []
+        self.objetos_3d = []   # modelos de arame 3D (T1.7/T1.8)
+
+    def adicionar_3d(self, objeto3d):
+        self.objetos_3d.append(objeto3d)
+        return objeto3d
 
     def adicionar(self, nome, tipo, coordenadas, cor="#000000", preenchido=False):
         objeto = Objeto2D(nome, tipo, coordenadas, cor, preenchido)
@@ -693,17 +698,25 @@ def matriz_rotacao_eixo_arbitrario(ponto_do_eixo, direcao, graus):
 class Objeto3D:
     """
     Um modelo de arame (wireframe) 3D: uma lista de ARESTAS, cada uma
-    um par de Ponto3D -- exatamente como pedido no enunciado. É
-    construído a partir de uma lista de vértices, na ordem digitada
-    pelo usuário, ligando cada vértice ao próximo e fechando do
-    último ao primeiro (igual ao wireframe 2D).
+    um par de Ponto3D -- exatamente como pedido no enunciado.
+
+    Pode ser construído de duas formas:
+      - a partir de uma lista de VÉRTICES (vertices=...), ligando cada
+        um ao próximo e fechando do último ao primeiro -- igual ao
+        wireframe 2D. Bom pra digitar um objeto simples na mão.
+      - a partir de uma lista de ARESTAS já prontas (arestas=...) --
+        usado ao carregar um .obj de verdade (Trabalho 1.8), onde as
+        arestas vêm das faces do arquivo, não formam um laço simples.
     """
 
-    def __init__(self, nome, vertices, cor="#008000"):
+    def __init__(self, nome, vertices=None, arestas=None, cor="#008000"):
         self.nome = nome
         self.cor = cor
-        n = len(vertices)
-        self.arestas = [(vertices[i], vertices[(i + 1) % n]) for i in range(n)]
+        if arestas is not None:
+            self.arestas = arestas
+        else:
+            n = len(vertices)
+            self.arestas = [(vertices[i], vertices[(i + 1) % n]) for i in range(n)]
 
     def pontos(self):
         """Todos os Ponto3D do objeto, sem repetição -- é sobre eles
@@ -785,6 +798,154 @@ def projetar_paralela_ortogonal(ponto3d, vrp, vpn):
     matriz = matriz_sru_para_src(vrp, vpn)
     x, y, _z = aplicar_matriz4_no_ponto(matriz, ponto3d.como_tupla())
     return (x, y)
+
+
+# PROJEÇÃO EM PERSPECTIVA (Trabalho 1.8)
+#
+# Algoritmo (slide 6.8 do material da disciplina -- praticamente
+# idêntico ao da projeção paralela, só muda o passo 4):
+#   1. Translade COP para a origem.
+#   2. Determine os ângulos de VPN com X e Y.
+#   3. Rotacione o mundo em torno de X e Y de forma a alinhar VPN
+#      com o eixo Z.           <- passos 1-3 = matriz_sru_para_src()
+#   4. Projete, calculando xp e yp (Eq. 6.2: xp = x/(z/d), yp = y/(z/d)).
+#   5. Normalize xp e yp (coordenadas de window).
+#   6. Clippe 2D.
+#   7. Transforme para coordenadas de Viewport.
+#
+# "d" é a distância do COP até o plano de projeção. Sozinho, "d" só
+# reescala a imagem inteira (como um zoom simples) -- a razão de
+# tamanho entre um ponto perto e um ponto longe NÃO muda só com "d"
+# (testado: xp1/xp2 = (x1/z1)/(x2/z2), e "d" não aparece nessa razão).
+# O efeito de "grande angular" (mais distorção, profundidade
+# exagerada) vs "teleobjetiva" (mais achatado, parece projeção
+# paralela) de verdade vem de MOVER o COP (câmera mais perto = grande
+# angular, mais longe = teleobjetiva) e ajustar "d" junto pra manter
+# a cena enquadrada -- exatamente como pede o enunciado: "variar a
+# POSIÇÃO do centro de projeção", não só um valor de distância focal.
+# (É a mesma razão pela qual, numa câmera de verdade, só trocar a
+# lente no mesmo lugar não muda a perspectiva -- só dá zoom.)
+
+def matriz_perspectiva(d):
+    """M_PER (Eq. 6.3): caso especial em que o COP já está na origem
+    e o plano de projeção fica em z = d."""
+    return ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 1 / d, 0))
+
+
+def projetar_perspectiva(ponto3d, cop, vpn, d):
+    """
+    Passos 1-4 do algoritmo de perspectiva, aplicados a UM ponto.
+    Os passos 1-3 são EXATAMENTE os mesmos da projeção paralela (só
+    trocando VRP por COP no nome) -- por isso reaproveitamos
+    matriz_sru_para_src() sem mudar uma linha dela. O que muda é só o
+    passo 4: em vez de descartar o Z, ele é usado pra dividir x e y
+    (Eq. 6.2), o que cria o efeito de perspectiva (quanto maior o z,
+    mais o ponto "encolhe" em direção ao centro).
+    """
+    matriz = matriz_sru_para_src(cop, vpn)
+    x, y, z = aplicar_matriz4_no_ponto(matriz, ponto3d.como_tupla())
+
+    w = z / d
+    if abs(w) < 1e-9:
+        # ponto praticamente em cima do COP/plano -- evita divisão por
+        # zero; na prática isso é um ponto degenerado (olhando "de
+        # lado" pra ele), então só afastamos um pouco artificialmente.
+        w = 1e-9 if w >= 0 else -1e-9
+
+    return (x / w, y / w)
+
+
+Z_MIN_PERSPECTIVA = 1.0   # "plano near": só desenha o que está à frente do COP
+
+
+def projetar_aresta_perspectiva(p1_3d, p2_3d, cop, vpn, d):
+    """
+    Projeta uma ARESTA em perspectiva tratando pontos ATRÁS do COP.
+    Depois dos passos 1-3 o COP está na origem e a câmera olha para +Z,
+    então "atrás do COP" significa z <= 0. Dividir por z nesses pontos
+    espelha a imagem (lixo). Por isso, antes do passo 4, a aresta é
+    cortada no plano z = Z_MIN_PERSPECTIVA (interpolação linear):
+      - os dois pontos à frente: segue normal;
+      - os dois atrás: aresta descartada (retorna None);
+      - um de cada lado: o ponto de trás é trocado pelo ponto da aresta
+        em z = Z_MIN (parâmetro t = (zmin - z1)/(z2 - z1)).
+    Retorna ((x1,y1),(x2,y2)) já projetados, ou None.
+    """
+    matriz = matriz_sru_para_src(cop, vpn)
+    x1, y1, z1 = aplicar_matriz4_no_ponto(matriz, p1_3d.como_tupla())
+    x2, y2, z2 = aplicar_matriz4_no_ponto(matriz, p2_3d.como_tupla())
+
+    if z1 < Z_MIN_PERSPECTIVA and z2 < Z_MIN_PERSPECTIVA:
+        return None
+
+    if z1 < Z_MIN_PERSPECTIVA or z2 < Z_MIN_PERSPECTIVA:
+        t = (Z_MIN_PERSPECTIVA - z1) / (z2 - z1)
+        xc = x1 + t * (x2 - x1)
+        yc = y1 + t * (y2 - y1)
+        if z1 < Z_MIN_PERSPECTIVA:
+            x1, y1, z1 = xc, yc, Z_MIN_PERSPECTIVA
+        else:
+            x2, y2, z2 = xc, yc, Z_MIN_PERSPECTIVA
+
+    return ((x1 / (z1 / d), y1 / (z1 / d)), (x2 / (z2 / d), y2 / (z2 / d)))
+
+
+# LEITURA DE ARQUIVO .OBJ 3D "DE VERDADE" (Trabalho 1.8)
+#
+# O leitor de .obj que já existe (DescritorOBJ/carregar_mundo_obj) é
+# o formato CASEIRO desta aplicação: sempre z=0, com comentários
+# "# tipo"/"# cor" próprios. Pra carregar um paralelepípedo (ou
+# qualquer modelo) de um .obj de verdade -- do tipo que vem de
+# qualquer ferramenta 3D, com "v x y z" e faces "f i j k ..." (às
+# vezes com índice de textura/normal tipo "f 1/1/1 2/2/1 ...") --
+# precisamos de um leitor à parte, que preserva o Z e lê faces.
+
+def carregar_objeto3d_obj(caminho):
+    """
+    Lê um .obj 3D comum e devolve (pontos, arestas) prontos para
+    montar um Objeto3D: cada face "f" vira um laço de arestas
+    (vértice -> próximo -> ... -> fecha no primeiro), igual a como um
+    wireframe 2D fecha do último vértice no primeiro. Arestas
+    repetidas (comuns quando duas faces vizinhas compartilham uma
+    aresta, como nas faces de um paralelepípedo) são unidas num
+    conjunto (set) pra não desenhar a mesma linha duas vezes.
+    """
+
+    def indice_do_vertice(token):
+        # um token de face pode vir como "12", "12/5" (com textura)
+        # ou "12/5/3" ou "12//3" (com normal, sem textura) -- o
+        # índice do VÉRTICE é sempre o primeiro número, e o .obj
+        # numera a partir de 1, não de 0.
+        return int(token.split("/")[0]) - 1
+
+    vertices_brutos = []
+    arestas_indices = set()
+
+    with open(caminho, "r", encoding="utf-8") as arquivo:
+        for linha in arquivo:
+            partes = linha.split()
+            if not partes:
+                continue
+
+            if partes[0] == "v":
+                x, y, z = float(partes[1]), float(partes[2]), float(partes[3])
+                vertices_brutos.append((x, y, z))
+
+            elif partes[0] == "l":
+                indices = [indice_do_vertice(p) for p in partes[1:]]
+                for i in range(len(indices) - 1):
+                    arestas_indices.add(tuple(sorted((indices[i], indices[i + 1]))))
+
+            elif partes[0] == "f":
+                indices = [indice_do_vertice(p) for p in partes[1:]]
+                n = len(indices)
+                for i in range(n):
+                    aresta = tuple(sorted((indices[i], indices[(i + 1) % n])))
+                    arestas_indices.add(aresta)
+
+    pontos = [Ponto3D(*v) for v in vertices_brutos]
+    arestas = [(pontos[i], pontos[j]) for i, j in arestas_indices]
+    return pontos, arestas
 
 
 # LEITURA E ESCRITA DE ARQUIVOS .OBJ (herdadas da entrega anterior)
@@ -1255,9 +1416,14 @@ class Aplicacao:
         # é por isso que o VRP vira a origem no passo 1 do algoritmo:
         # assim a window 2D (centrada em 0,0) já funciona sem mudar
         # nada.
-        self.objetos_3d = []
         self.vrp = (0.0, 0.0, -100.0)
         self.vpn = (0.0, 0.0, 1.0)
+
+        # Trabalho 1.8: tipo de projeção (paralela ou perspectiva) e a
+        # distância "d" do COP (mesma câmera acima, vrp/vpn, reaproveitada
+        # como COP) até o plano de projeção -- é ela que cria o efeito
+        # de grande angular (d pequeno) ou teleobjetiva (d grande).
+        self.d_perspectiva = 200.0
 
         self._montar_interface()
         self._redesenhar()
@@ -1457,6 +1623,46 @@ class Aplicacao:
         )
         self.label_camera_atual.pack(anchor="w")
 
+        # Tipo de projeção (Trabalho 1.8)
+        tk.Label(painel, text="Tipo de projeção").pack(anchor="w", pady=(10, 0))
+        self.tipo_projecao = tk.StringVar(value="paralela")
+        tk.Radiobutton(
+            painel, text="Paralela ortogonal", variable=self.tipo_projecao,
+            value="paralela", command=self._redesenhar,
+        ).pack(anchor="w")
+        tk.Radiobutton(
+            painel, text="Perspectiva", variable=self.tipo_projecao,
+            value="perspectiva", command=self._redesenhar,
+        ).pack(anchor="w")
+
+        # Distância "d" do COP ao plano de projeção. Sozinho, "d" só
+        # reescala a imagem (como um zoom) -- NÃO muda a distorção de
+        # perspectiva entre perto/longe. O efeito grande angular
+        # (mais distorção) / teleobjetiva (mais achatado) de verdade
+        # vem de MOVER o COP (mais perto = grande angular, mais longe
+        # = teleobjetiva) e ajustar "d" junto pra reenquadrar a cena
+        # -- por isso o enunciado pede pra variar a POSIÇÃO do COP,
+        # não só um valor de distância focal.
+        frame_d = tk.Frame(painel)
+        frame_d.pack(anchor="w", pady=(5, 0))
+        tk.Label(frame_d, text="Distância d (COP->plano):").grid(row=0, column=0, columnspan=2, sticky="w")
+        tk.Button(frame_d, text="d--", command=lambda: self._mudar_d(0.5)).grid(row=1, column=0)
+        tk.Button(frame_d, text="d++", command=lambda: self._mudar_d(2.0)).grid(row=1, column=1)
+        self.label_d_atual = tk.Label(painel, text="d = 200.0")
+        self.label_d_atual.pack(anchor="w")
+        tk.Label(
+            painel,
+            text="P/ efeito grande angular: aproxime o COP\n(Z+ em Navegar câmera) e diminua d.\n"
+                 "P/ teleobjetiva: afaste o COP (Z-) e\naumente d.",
+            justify="left", font=("TkDefaultFont", 8), fg="gray30",
+        ).pack(anchor="w")
+
+        # Carregar objeto 3D de um .obj "de verdade" (com faces f),
+        # pra testar a perspectiva com, por exemplo, um paralelepípedo.
+        tk.Button(
+            painel, text="Carregar objeto 3D (.obj)", command=self._carregar_objeto3d_obj
+        ).pack(pady=(5, 0))
+
         # Navegação da window no espaço 3D: mover a câmera (VRP) e
         # girar pra onde ela olha (VPN) -- o equivalente, em código,
         # de "arrastar o botão do meio do mouse" no Blender. O zoom
@@ -1648,7 +1854,7 @@ class Aplicacao:
             return
 
         objeto3d = Objeto3D(nome, vertices, cor=self.cor_selecionada)
-        self.objetos_3d.append(objeto3d)
+        self.display_file.adicionar_3d(objeto3d)
         self.entrada_nome_3d.delete(0, tk.END)
         self.entrada_coordenadas_3d.delete(0, tk.END)
         self._redesenhar()
@@ -1658,7 +1864,7 @@ class Aplicacao:
         if not selecionado:
             messagebox.showerror("Erro", "Selecione um objeto 3D na lista primeiro.")
             return
-        objeto3d = self.objetos_3d[selecionado[0]]
+        objeto3d = self.display_file.objetos_3d[selecionado[0]]
         JanelaTransformacao3D(self.raiz, objeto3d, ao_aplicar=self._redesenhar)
 
     def _definir_camera(self):
@@ -1683,7 +1889,7 @@ class Aplicacao:
         if not selecionado:
             messagebox.showerror("Erro", "Selecione um objeto 3D na lista primeiro.")
             return
-        objeto3d = self.objetos_3d[selecionado[0]]
+        objeto3d = self.display_file.objetos_3d[selecionado[0]]
         primeiro_ponto = objeto3d.arestas[0][0]
         self.vrp = primeiro_ponto.como_tupla()
         self._redesenhar()
@@ -1708,6 +1914,37 @@ class Aplicacao:
         self.vpn = aplicar_matriz4_no_ponto(matriz, self.vpn)
         self._redesenhar()
 
+    def _mudar_d(self, fator):
+        """Multiplica a distância d por um fator -- usado pelos botões
+        'Grande angular' (fator < 1, aproxima o COP do plano, mais
+        distorção) e 'Teleobjetiva' (fator > 1, afasta o COP, achata
+        a perspectiva, parecendo mais com uma projeção paralela)."""
+        self.d_perspectiva *= fator
+        self._redesenhar()
+
+    def _carregar_objeto3d_obj(self):
+        """Carrega um objeto 3D de um .obj 'de verdade' (com faces f),
+        como pedido no enunciado (ex: um paralelepípedo) -- diferente
+        do .obj caseiro 2D usado em 'Salvar/Carregar mundo'."""
+        caminho = filedialog.askopenfilename(filetypes=[("Wavefront OBJ", "*.obj")])
+        if not caminho:
+            return
+
+        try:
+            pontos, arestas = carregar_objeto3d_obj(caminho)
+        except (OSError, ValueError, IndexError) as erro:
+            messagebox.showerror("Erro", f"Não foi possível ler o arquivo:\n{erro}")
+            return
+
+        if not arestas:
+            messagebox.showerror("Erro", "O arquivo não tem arestas/faces (linhas 'l' ou 'f') legíveis.")
+            return
+
+        nome = caminho.replace("\\", "/").split("/")[-1].rsplit(".", 1)[0]
+        objeto3d = Objeto3D(nome, arestas=arestas, cor=self.cor_selecionada)
+        self.display_file.adicionar_3d(objeto3d)
+        self._redesenhar()
+
     # Desenho
     def _redesenhar(self):
         self.canvas.delete("all")
@@ -1721,6 +1958,7 @@ class Aplicacao:
         vrp_arredondado = tuple(round(v, 3) for v in self.vrp)
         vpn_arredondado = tuple(round(v, 3) for v in self.vpn)
         self.label_camera_atual.config(text=f"VRP={vrp_arredondado}\nVPN={vpn_arredondado}")
+        self.label_d_atual.config(text=f"d = {self.d_perspectiva:.1f}")
 
         self._desenhar_moldura_viewport()
 
@@ -1806,14 +2044,23 @@ class Aplicacao:
                         p2_tela = self.viewport.local_para_tela(resultado[1], self.window)
                         self._desenhar_linha(p1_tela, p2_tela, objeto.cor)
 
-        # ---- Objetos 3D: projeção paralela ortogonal (Trabalho 1.7) ----
-        for objeto3d in self.objetos_3d:
+        # ---- Objetos 3D: projeção paralela OU perspectiva (T1.7/T1.8) ----
+        usar_perspectiva = self.tipo_projecao.get() == "perspectiva"
+
+        for objeto3d in self.display_file.objetos_3d:
             self.lista_objetos_3d.insert(tk.END, repr(objeto3d))
 
             for p1_3d, p2_3d in objeto3d.arestas:
-                # passos 1-4 do algoritmo: SRU -> SRC e descarta o Z
-                p1_2d = projetar_paralela_ortogonal(p1_3d, self.vrp, self.vpn)
-                p2_2d = projetar_paralela_ortogonal(p2_3d, self.vrp, self.vpn)
+                # passos 1-4 do algoritmo (paralela ou perspectiva --
+                # os passos 1-3, SRU -> SRC, são os mesmos nos dois)
+                if usar_perspectiva:
+                    par = projetar_aresta_perspectiva(p1_3d, p2_3d, self.vrp, self.vpn, self.d_perspectiva)
+                    if par is None:
+                        continue   # aresta inteira atrás do COP
+                    p1_2d, p2_2d = par
+                else:
+                    p1_2d = projetar_paralela_ortogonal(p1_3d, self.vrp, self.vpn)
+                    p2_2d = projetar_paralela_ortogonal(p2_3d, self.vrp, self.vpn)
 
                 # passos 5-7: a partir daqui é um ponto 2D comum --
                 # reaproveita window/clipping/viewport já prontos
