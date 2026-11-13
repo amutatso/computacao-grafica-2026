@@ -30,10 +30,15 @@ class DisplayFile:
     def __init__(self):
         self.objetos = []
         self.objetos_3d = []   # modelos de arame 3D (T1.7/T1.8)
+        self.superficies = []  # superfícies bicúbicas de Bézier (T1.9)
 
     def adicionar_3d(self, objeto3d):
         self.objetos_3d.append(objeto3d)
         return objeto3d
+
+    def adicionar_superficie(self, superficie):
+        self.superficies.append(superficie)
+        return superficie
 
     def adicionar(self, nome, tipo, coordenadas, cor="#000000", preenchido=False):
         objeto = Objeto2D(nome, tipo, coordenadas, cor, preenchido)
@@ -948,6 +953,179 @@ def carregar_objeto3d_obj(caminho):
     return pontos, arestas
 
 
+# SUPERFÍCIES BICÚBICAS DE BÉZIER (Trabalho 1.9)
+#
+# Um "retalho" (patch) é definido por 16 pontos de controle numa
+# matriz 4x4 -- a MATRIZ DE GEOMETRIA do retalho. Como são 3
+# coordenadas, na prática são três matrizes 4x4: Gx, Gy e Gz (a
+# linha i, coluna j de cada uma guarda x, y ou z do ponto P_ij).
+#
+# A função de suavização (blending) bicúbica, para cada coordenada, é
+#
+#       Q(s,t) = S . M . G . M^T . T^T        com s, t em [0, 1]
+#
+# onde S = [s³ s² s 1], T = [t³ t² t 1] e M é a MESMA matriz de Bézier
+# que já usamos nas curvas (matriz_bezier()). É a versão em 2 variáveis
+# da curva Q(t) = T . M . G: primeiro "suaviza" ao longo de s (M.G) e
+# depois ao longo de t (.M^T).
+#
+# Desenho: em vez de preencher a superfície, desenhamos uma malha de
+# CURVAS ISOPARAMÉTRICAS -- fixa s e varre t (uma curva), depois fixa t
+# e varre s. Cada ponto da curva é calculado AVALIANDO a função de
+# suavização (blending function) explicitamente, com passo delta
+# (Trabalho 1.9). O resultado é um modelo de arame: uma lista de
+# polilinhas 3D, que passa pela mesma projeção e pelo mesmo clipping 2D
+# dos objetos 3D. (Calcular os pontos só com somas, por forward
+# differences, é o assunto do Trabalho 1.10.)
+#
+# Uma superfície COMPOSTA é só uma lista de retalhos, cada um com sua
+# própria matriz de geometria (cada retalho é desenhado de forma
+# independente).
+
+def transpor_matriz4(matriz):
+    return tuple(tuple(matriz[j][i] for j in range(4)) for i in range(4))
+
+
+def coeficientes_do_retalho(retalho):
+    """
+    Para cada eixo (x, y, z) calcula C = M . G . M^T, a matriz 4x4 de
+    COEFICIENTES do polinômio bicúbico: Q(s,t) = S . C . T^T. Devolve
+    [Cx, Cy, Cz]. Isso só depende dos pontos de controle, então é
+    calculado UMA vez por retalho e reaproveitado em todas as curvas.
+    """
+    M = matriz_bezier()
+    Mt = transpor_matriz4(M)
+    coeficientes = []
+    for eixo in range(3):
+        G = [[ponto.como_tupla()[eixo] for ponto in linha] for linha in retalho]
+        coeficientes.append(multiplicar_matrizes4(multiplicar_matrizes4(M, G), Mt))
+    return coeficientes
+
+
+def avaliar_retalho(retalho, s, t):
+    """Q(s,t) direto (sem forward differences) -- usado só para
+    conferir/testar; o desenho usa as curvas abaixo."""
+    S = (s ** 3, s ** 2, s, 1)
+    T = (t ** 3, t ** 2, t, 1)
+    ponto = []
+    for C in coeficientes_do_retalho(retalho):
+        ponto.append(sum(S[i] * C[i][j] * T[j] for i in range(4) for j in range(4)))
+    return tuple(ponto)
+
+
+def _pontos_por_blending_3d(coefs_xyz, passos):
+    """
+    coefs_xyz: três vetores [a, b, c, d] (x, y, z) de um cúbico em UMA
+    variável u: f(u) = a u³ + b u² + c u + d = [u³ u² u 1] . [a b c d]^T.
+    Gera passos+1 pontos 3D com u = 0, delta, 2 delta, ..., 1 (delta =
+    1/passos) AVALIANDO a função de suavização explicitamente em cada
+    u -- é o que o Trabalho 1.9 pede (Blending Functions). A versão com
+    forward differences (que só soma, sem reavaliar o polinômio) é o
+    Trabalho 1.10.
+    """
+    pontos = []
+    for i in range(passos + 1):
+        u = i / passos
+        U = (u ** 3, u ** 2, u, 1)
+        pontos.append(tuple(sum(U[k] * c[k] for k in range(4)) for c in coefs_xyz))
+    return pontos
+
+
+def gerar_polilinhas_retalho(retalho, n_curvas=8, passos=20):
+    """
+    Malha de curvas isoparamétricas de UM retalho: n_curvas curvas com
+    s fixo (t varre 0..1) e n_curvas com t fixo (s varre 0..1), com
+    valores igualmente espaçados de 0 a 1 (inclui as 4 bordas do
+    retalho, s=0, s=1, t=0 e t=1). Cada curva é uma polilinha de
+    passos+1 pontos (tuplas x,y,z).
+    """
+    C = coeficientes_do_retalho(retalho)
+    polilinhas = []
+    for k in range(n_curvas):
+        u = k / (n_curvas - 1)
+        U = (u ** 3, u ** 2, u, 1)
+
+        # s = u fixo: Q(u,t) = (S.C) . T^T -> vetor de coeficientes em t
+        coefs_em_t = [[sum(U[i] * Ce[i][j] for i in range(4)) for j in range(4)] for Ce in C]
+        polilinhas.append(_pontos_por_blending_3d(coefs_em_t, passos))
+
+        # t = u fixo: Q(s,u) = S . (C.T^T) -> vetor de coeficientes em s
+        coefs_em_s = [[sum(Ce[i][j] * U[j] for j in range(4)) for i in range(4)] for Ce in C]
+        polilinhas.append(_pontos_por_blending_3d(coefs_em_s, passos))
+    return polilinhas
+
+
+class Superficie3D:
+    """
+    Superfície bicúbica de Bézier composta: uma LISTA DE RETALHOS, cada
+    retalho uma matriz 4x4 de Ponto3D (a matriz de geometria). Os
+    pontos de controle são Ponto3D comuns, então as MESMAS
+    transformações 3D (matrizes 4x4) do Objeto3D funcionam aqui:
+    transformar os pontos de controle transforma a superfície, porque
+    Bézier é invariante a transformações afins.
+    """
+
+    N_CURVAS = 8     # curvas isoparamétricas por direção, por retalho
+    PASSOS = 20      # segmentos por curva
+
+    def __init__(self, nome, retalhos, cor="#0000FF"):
+        self.nome = nome
+        self.retalhos = retalhos
+        self.cor = cor
+
+    def pontos(self):
+        """Todos os Ponto3D de controle, sem repetição (por identidade)
+        -- usado pela janela de transformação (centro do objeto etc.)."""
+        vistos = []
+        for retalho in self.retalhos:
+            for linha in retalho:
+                for ponto in linha:
+                    if ponto not in vistos:
+                        vistos.append(ponto)
+        return vistos
+
+    def aplicar_matriz(self, matriz):
+        for ponto in self.pontos():
+            ponto.aplicar_matriz(matriz)
+
+    def gerar_polilinhas(self):
+        polilinhas = []
+        for retalho in self.retalhos:
+            polilinhas.extend(gerar_polilinhas_retalho(retalho, self.N_CURVAS, self.PASSOS))
+        return polilinhas
+
+    def __repr__(self):
+        return f"{self.nome} [superfície, {len(self.retalhos)} retalhos]"
+
+
+def carregar_superficie_obj(caminho):
+    """
+    Lê um .obj de PONTOS DE CONTROLE (só linhas "v") e devolve a lista
+    de retalhos. Convenção: cada 16 vértices consecutivos formam um
+    retalho, preenchendo a matriz 4x4 linha por linha (os 4 primeiros
+    = linha 1, os 4 seguintes = linha 2, ...). Logo, 3 retalhos =
+    48 vértices.
+    """
+    vertices = []
+    with open(caminho, "r", encoding="utf-8") as arquivo:
+        for linha in arquivo:
+            partes = linha.split()
+            if partes and partes[0] == "v":
+                vertices.append(Ponto3D(float(partes[1]), float(partes[2]), float(partes[3])))
+
+    if not vertices or len(vertices) % 16 != 0:
+        raise ValueError(
+            f"o arquivo tem {len(vertices)} vértices 'v'; esperado um múltiplo de 16 "
+            "(16 pontos de controle por retalho)"
+        )
+
+    retalhos = []
+    for inicio in range(0, len(vertices), 16):
+        bloco = vertices[inicio:inicio + 16]
+        retalhos.append([bloco[0:4], bloco[4:8], bloco[8:12], bloco[12:16]])
+    return retalhos
+
+
 # LEITURA E ESCRITA DE ARQUIVOS .OBJ (herdadas da entrega anterior)
 
 class DescritorOBJ:
@@ -1572,7 +1750,7 @@ class Aplicacao:
         tk.Button(frame_obj, text="Carregar mundo", command=self._carregar_obj).grid(row=0, column=1, padx=2)
 
         # ---- Objetos 3D (Trabalho 1.7) ----
-        tk.Label(painel, text="— Objetos 3D (projeção paralela) —").pack(anchor="w", pady=(20, 0))
+        tk.Label(painel, text="— Objetos 3D (paralela ou perspectiva) —").pack(anchor="w", pady=(20, 0))
 
         self.lista_objetos_3d = tk.Listbox(painel, width=32, height=5)
         self.lista_objetos_3d.pack()
@@ -1597,6 +1775,43 @@ class Aplicacao:
         tk.Button(
             painel, text="Adicionar objeto 3D", command=self._adicionar_objeto_3d
         ).pack(pady=5)
+
+        # ---- Superfícies bicúbicas de Bézier (Trabalho 1.9) ----
+        tk.Label(painel, text="— Superfícies de Bézier —").pack(anchor="w", pady=(15, 0))
+
+        self.lista_superficies = tk.Listbox(painel, width=32, height=4)
+        self.lista_superficies.pack()
+
+        tk.Button(
+            painel, text="Transformar superfície selecionada",
+            command=self._abrir_janela_transformacao_superficie,
+        ).pack(pady=(5, 0))
+
+        tk.Label(painel, text="Nome da superfície:").pack(anchor="w", pady=(10, 0))
+        self.entrada_nome_superficie = tk.Entry(painel, width=32)
+        self.entrada_nome_superficie.pack()
+
+        tk.Label(
+            painel,
+            text="Pontos de controle: 4 linhas de 4 pontos por\n"
+                 "retalho, linhas separadas por ';' :\n"
+                 "(x,y,z),(x,y,z),(x,y,z),(x,y,z);(...);(...);(...)\n"
+                 "(4 linhas = 1 retalho; 12 linhas = 3 retalhos)",
+            justify="left", font=("TkDefaultFont", 8),
+        ).pack(anchor="w")
+        self.entrada_pontos_superficie = tk.Entry(painel, width=32)
+        self.entrada_pontos_superficie.pack()
+
+        frame_botoes_superficie = tk.Frame(painel)
+        frame_botoes_superficie.pack(pady=5)
+        tk.Button(
+            frame_botoes_superficie, text="Adicionar superfície",
+            command=self._adicionar_superficie,
+        ).grid(row=0, column=0, padx=2)
+        tk.Button(
+            frame_botoes_superficie, text="Carregar superfície (.obj)",
+            command=self._carregar_superficie_obj,
+        ).grid(row=0, column=1, padx=2)
 
         # Câmera: VRP / VPN -- definir direto (digitando) OU navegar
         tk.Label(painel, text="Câmera: VRP e VPN").pack(anchor="w", pady=(10, 0))
@@ -1771,6 +1986,74 @@ class Aplicacao:
         if isinstance(tupla_de_pontos[0], (int, float)):
             tupla_de_pontos = (tupla_de_pontos,)
         return [Ponto3D(float(x), float(y), float(z)) for x, y, z in tupla_de_pontos]
+
+    @staticmethod
+    def _parsear_retalhos(texto):
+        """
+        Lê o formato do enunciado: linhas da matriz separadas por ';',
+        cada linha com 4 pontos (x,y,z). Cada grupo de 4 linhas é um
+        retalho (matriz de geometria 4x4); portanto o número de linhas
+        precisa ser múltiplo de 4. Devolve uma lista de retalhos.
+        """
+        linhas_texto = [t.strip() for t in texto.split(";") if t.strip()]
+        if not linhas_texto or len(linhas_texto) % 4 != 0:
+            raise ValueError("o número de linhas deve ser múltiplo de 4")
+
+        linhas = []
+        for linha_texto in linhas_texto:
+            pontos = Aplicacao._parsear_coordenadas_3d(linha_texto)
+            if len(pontos) != 4:
+                raise ValueError("cada linha precisa ter exatamente 4 pontos")
+            linhas.append(pontos)
+
+        return [linhas[i:i + 4] for i in range(0, len(linhas), 4)]
+
+    def _adicionar_superficie(self):
+        nome = self.entrada_nome_superficie.get().strip()
+        if not nome:
+            messagebox.showerror("Erro", "Informe um nome para a superfície.")
+            return
+
+        try:
+            retalhos = self._parsear_retalhos(self.entrada_pontos_superficie.get().strip())
+        except (ValueError, SyntaxError, TypeError, IndexError) as erro:
+            messagebox.showerror(
+                "Erro",
+                "Pontos de controle inválidos.\n"
+                "Use 4 linhas de 4 pontos (x,y,z) por retalho, separadas por ';'.\n"
+                f"({erro})",
+            )
+            return
+
+        self.display_file.adicionar_superficie(Superficie3D(nome, retalhos, cor=self.cor_selecionada))
+        self.entrada_nome_superficie.delete(0, tk.END)
+        self.entrada_pontos_superficie.delete(0, tk.END)
+        self._redesenhar()
+
+    def _carregar_superficie_obj(self):
+        """Carrega uma superfície composta de um .obj de pontos de
+        controle (16 vértices 'v' por retalho)."""
+        caminho = filedialog.askopenfilename(filetypes=[("Wavefront OBJ", "*.obj")])
+        if not caminho:
+            return
+
+        try:
+            retalhos = carregar_superficie_obj(caminho)
+        except (OSError, ValueError, IndexError) as erro:
+            messagebox.showerror("Erro", f"Não foi possível ler o arquivo:\n{erro}")
+            return
+
+        nome = caminho.replace("\\", "/").split("/")[-1].rsplit(".", 1)[0]
+        self.display_file.adicionar_superficie(Superficie3D(nome, retalhos, cor=self.cor_selecionada))
+        self._redesenhar()
+
+    def _abrir_janela_transformacao_superficie(self):
+        selecionado = self.lista_superficies.curselection()
+        if not selecionado:
+            messagebox.showerror("Erro", "Selecione uma superfície na lista primeiro.")
+            return
+        superficie = self.display_file.superficies[selecionado[0]]
+        JanelaTransformacao3D(self.raiz, superficie, ao_aplicar=self._redesenhar)
 
     def _abrir_janela_transformacao(self):
         selecionado = self.lista_objetos.curselection()
@@ -1950,6 +2233,7 @@ class Aplicacao:
         self.canvas.delete("all")
         self.lista_objetos.delete(0, tk.END)
         self.lista_objetos_3d.delete(0, tk.END)
+        self.lista_superficies.delete(0, tk.END)
         self.label_angulo_atual.config(text=f"Ângulo atual: {self.window.angulo % 360:.1f}°")
         # Arredonda pra exibição -- o valor de verdade (self.vrp/self.vpn,
         # usado nos cálculos) continua com a precisão cheia; isso é só
@@ -2051,31 +2335,57 @@ class Aplicacao:
             self.lista_objetos_3d.insert(tk.END, repr(objeto3d))
 
             for p1_3d, p2_3d in objeto3d.arestas:
-                # passos 1-4 do algoritmo (paralela ou perspectiva --
-                # os passos 1-3, SRU -> SRC, são os mesmos nos dois)
-                if usar_perspectiva:
-                    par = projetar_aresta_perspectiva(p1_3d, p2_3d, self.vrp, self.vpn, self.d_perspectiva)
-                    if par is None:
-                        continue   # aresta inteira atrás do COP
-                    p1_2d, p2_2d = par
-                else:
-                    p1_2d = projetar_paralela_ortogonal(p1_3d, self.vrp, self.vpn)
-                    p2_2d = projetar_paralela_ortogonal(p2_3d, self.vrp, self.vpn)
+                self._desenhar_segmento_3d(
+                    p1_3d, p2_3d, objeto3d.cor, usar_perspectiva, usar_liang_barsky,
+                    (xmin, xmax, ymin, ymax),
+                )
 
-                # passos 5-7: a partir daqui é um ponto 2D comum --
-                # reaproveita window/clipping/viewport já prontos
-                p1_local = self.window.mundo_para_local(p1_2d)
-                p2_local = self.window.mundo_para_local(p2_2d)
+        # ---- Superfícies bicúbicas de Bézier (T1.9) ----
+        # Cada superfície vira uma lista de polilinhas 3D (curvas
+        # isoparamétricas de todos os retalhos); cada pequeno segmento
+        # delas passa pelo MESMO caminho de projeção + clipping 2D das
+        # arestas dos objetos 3D.
+        for superficie in self.display_file.superficies:
+            self.lista_superficies.insert(tk.END, repr(superficie))
 
-                if usar_liang_barsky:
-                    resultado = clipar_reta_liang_barsky(p1_local, p2_local, xmin, xmax, ymin, ymax)
-                else:
-                    resultado = clipar_reta_cohen_sutherland(p1_local, p2_local, xmin, xmax, ymin, ymax)
+            for polilinha in superficie.gerar_polilinhas():
+                for i in range(len(polilinha) - 1):
+                    self._desenhar_segmento_3d(
+                        Ponto3D(*polilinha[i]), Ponto3D(*polilinha[i + 1]),
+                        superficie.cor, usar_perspectiva, usar_liang_barsky,
+                        (xmin, xmax, ymin, ymax),
+                    )
 
-                if resultado is not None:
-                    p1_tela = self.viewport.local_para_tela(resultado[0], self.window)
-                    p2_tela = self.viewport.local_para_tela(resultado[1], self.window)
-                    self._desenhar_linha(p1_tela, p2_tela, objeto3d.cor)
+    def _desenhar_segmento_3d(self, p1_3d, p2_3d, cor, usar_perspectiva, usar_liang_barsky, limites):
+        """Projeta, clipa (2D) e desenha UM segmento 3D -- passos 1-7
+        do algoritmo. Compartilhado por objetos 3D e superfícies."""
+        xmin, xmax, ymin, ymax = limites
+
+        # passos 1-4 do algoritmo (paralela ou perspectiva --
+        # os passos 1-3, SRU -> SRC, são os mesmos nos dois)
+        if usar_perspectiva:
+            par = projetar_aresta_perspectiva(p1_3d, p2_3d, self.vrp, self.vpn, self.d_perspectiva)
+            if par is None:
+                return   # segmento inteiro atrás do COP
+            p1_2d, p2_2d = par
+        else:
+            p1_2d = projetar_paralela_ortogonal(p1_3d, self.vrp, self.vpn)
+            p2_2d = projetar_paralela_ortogonal(p2_3d, self.vrp, self.vpn)
+
+        # passos 5-7: a partir daqui é um ponto 2D comum --
+        # reaproveita window/clipping/viewport já prontos
+        p1_local = self.window.mundo_para_local(p1_2d)
+        p2_local = self.window.mundo_para_local(p2_2d)
+
+        if usar_liang_barsky:
+            resultado = clipar_reta_liang_barsky(p1_local, p2_local, xmin, xmax, ymin, ymax)
+        else:
+            resultado = clipar_reta_cohen_sutherland(p1_local, p2_local, xmin, xmax, ymin, ymax)
+
+        if resultado is not None:
+            p1_tela = self.viewport.local_para_tela(resultado[0], self.window)
+            p2_tela = self.viewport.local_para_tela(resultado[1], self.window)
+            self._desenhar_linha(p1_tela, p2_tela, cor)
 
     def _desenhar_moldura_viewport(self):
         """Desenha o retângulo exato onde a window (já mapeada pra
