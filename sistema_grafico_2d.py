@@ -916,37 +916,29 @@ def carregar_objeto3d_obj(caminho):
     conjunto (set) pra não desenhar a mesma linha duas vezes.
     """
 
-    def indice_do_vertice(token):
-        # um token de face pode vir como "12", "12/5" (com textura)
-        # ou "12/5/3" ou "12//3" (com normal, sem textura) -- o
-        # índice do VÉRTICE é sempre o primeiro número, e o .obj
-        # numera a partir de 1, não de 0.
-        return int(token.split("/")[0]) - 1
-
+    # um token de face pode vir como "12", "12/5" (com textura) ou
+    # "12/5/3" / "12//3" (com normal) -- só o 1º número (o vértice)
+    # importa. Índice negativo conta de trás pra frente (-1 = o último
+    # vértice lido). _resolver_indice_obj cuida de tudo isso.
     vertices_brutos = []
     arestas_indices = set()
 
-    with open(caminho, "r", encoding="utf-8") as arquivo:
-        for linha in arquivo:
-            partes = linha.split()
-            if not partes:
-                continue
+    for partes in _linhas_logicas_obj(caminho):
+        if partes[0] == "v":
+            x, y, z = float(partes[1]), float(partes[2]), float(partes[3])
+            vertices_brutos.append((x, y, z))
 
-            if partes[0] == "v":
-                x, y, z = float(partes[1]), float(partes[2]), float(partes[3])
-                vertices_brutos.append((x, y, z))
+        elif partes[0] == "l":
+            indices = [_resolver_indice_obj(p, len(vertices_brutos)) for p in partes[1:]]
+            for i in range(len(indices) - 1):
+                arestas_indices.add(tuple(sorted((indices[i], indices[i + 1]))))
 
-            elif partes[0] == "l":
-                indices = [indice_do_vertice(p) for p in partes[1:]]
-                for i in range(len(indices) - 1):
-                    arestas_indices.add(tuple(sorted((indices[i], indices[i + 1]))))
-
-            elif partes[0] == "f":
-                indices = [indice_do_vertice(p) for p in partes[1:]]
-                n = len(indices)
-                for i in range(n):
-                    aresta = tuple(sorted((indices[i], indices[(i + 1) % n])))
-                    arestas_indices.add(aresta)
+        elif partes[0] == "f":
+            indices = [_resolver_indice_obj(p, len(vertices_brutos)) for p in partes[1:]]
+            n = len(indices)
+            for i in range(n):
+                aresta = tuple(sorted((indices[i], indices[(i + 1) % n])))
+                arestas_indices.add(aresta)
 
     pontos = [Ponto3D(*v) for v in vertices_brutos]
     arestas = [(pontos[i], pontos[j]) for i, j in arestas_indices]
@@ -1124,6 +1116,118 @@ def carregar_superficie_obj(caminho):
         bloco = vertices[inicio:inicio + 16]
         retalhos.append([bloco[0:4], bloco[4:8], bloco[8:12], bloco[12:16]])
     return retalhos
+
+
+def _linhas_logicas_obj(caminho):
+    """
+    Gera, para cada linha "lógica" do .obj, a lista de seus tokens.
+    Segue o que a especificação Wavefront diz sobre o texto:
+      - comentário começa com '#' e vai até o fim da linha (ignorado);
+      - uma linha terminada em '\\' continua na linha seguinte (a
+        especificação usa isso em comandos "surf" longos);
+      - linhas em branco são ignoradas.
+    """
+    acumulada = ""
+    with open(caminho, "r", encoding="utf-8") as arquivo:
+        for linha in arquivo:
+            linha = linha.split("#", 1)[0].rstrip()
+            if linha.endswith("\\"):
+                acumulada += linha[:-1] + " "
+                continue
+            partes = (acumulada + linha).split()
+            acumulada = ""
+            if partes:
+                yield partes
+    if acumulada.split():
+        yield acumulada.split()
+
+
+def _resolver_indice_obj(token, total_vertices):
+    """
+    Converte um índice de vértice do .obj para base 0. O .obj numera a
+    partir de 1; índice NEGATIVO conta de trás pra frente a partir do
+    último vértice lido até ali (-1 = o vértice imediatamente acima).
+    O token pode vir como '7', '7/2' ou '7//3': só o 1º número importa.
+    """
+    i = int(token.split("/")[0])
+    resolvido = total_vertices + i if i < 0 else i - 1
+    if i == 0 or not 0 <= resolvido < total_vertices:
+        raise ValueError(f"índice de vértice inválido: {token} (há {total_vertices} vértices até aqui)")
+    return resolvido
+
+
+def ler_superficies_obj(caminho):
+    """
+    Lê os comandos de superfície "free-form" do formato Wavefront:
+
+        cstype bezier | bspline     tipo da superfície
+        deg 3 3                     grau em u e em v
+        surf s0 s1 t0 t1 i1 i2 ...  índices dos pontos de controle
+        parm u ...  /  parm v ...   vetores de nós (knots)
+        end                         fim da superfície
+
+    Devolve (vertices, lista de dicts com tipo, grau, indices, knots_u,
+    knots_v). Os comandos cstype/deg valem para as superfícies seguintes
+    até serem trocados (são "state-setting" na especificação).
+    """
+    vertices, superficies = [], []
+    tipo, grau, atual = None, None, None
+
+    for partes in _linhas_logicas_obj(caminho):
+        comando = partes[0]
+
+        if comando == "v":
+            vertices.append(Ponto3D(float(partes[1]), float(partes[2]), float(partes[3])))
+
+        elif comando == "cstype":
+            if "rat" in partes[1:]:
+                raise ValueError("superfícies racionais (cstype rat) não são suportadas")
+            tipo = partes[-1].lower()
+
+        elif comando == "deg":
+            grau_u = int(partes[1])
+            grau = (grau_u, int(partes[2]) if len(partes) > 2 else grau_u)
+
+        elif comando == "surf":
+            # surf s0 s1 t0 t1 <índices>: os 4 primeiros são o intervalo
+            # de parâmetros, que aqui é sempre 0..1 (não usamos)
+            indices = [_resolver_indice_obj(t, len(vertices)) for t in partes[5:]]
+            atual = {"tipo": tipo, "grau": grau, "indices": indices,
+                     "knots_u": None, "knots_v": None}
+            superficies.append(atual)
+
+        elif comando == "parm" and atual is not None:
+            valores = [float(t) for t in partes[2:]]
+            atual["knots_u" if partes[1] == "u" else "knots_v"] = valores
+
+        elif comando == "end":
+            atual = None
+
+    return vertices, superficies
+
+
+def carregar_superficies_freeform_obj(caminho, nome, cor):
+    """
+    Monta a superfície de um .obj que usa "surf" (formato Wavefront).
+    Devolve uma lista com UMA superfície composta, ou None se o arquivo
+    não tem nenhum "surf" (aí vale a convenção antiga, só com 'v').
+    Cada "surf" bicúbico de Bézier é UM retalho (16 pontos de controle).
+    """
+    vertices, superficies = ler_superficies_obj(caminho)
+    if not superficies:
+        return None
+
+    retalhos = []
+    for numero, s in enumerate(superficies, 1):
+        if s["tipo"] != "bezier":
+            raise ValueError(f"surf {numero}: cstype '{s['tipo']}' não suportado nesta etapa (só bezier)")
+        if s["grau"] != (3, 3):
+            raise ValueError(f"surf {numero}: grau {s['grau']} não suportado (só 'deg 3 3', bicúbico)")
+        pontos = [vertices[i] for i in s["indices"]]
+        if len(pontos) != 16:
+            raise ValueError(f"surf {numero}: Bézier bicúbica pede 16 pontos de controle, veio {len(pontos)}")
+        retalhos.append([pontos[0:4], pontos[4:8], pontos[8:12], pontos[12:16]])
+    return [Superficie3D(nome, retalhos, cor)]
 
 
 # LEITURA E ESCRITA DE ARQUIVOS .OBJ (herdadas da entrega anterior)
@@ -2037,14 +2141,20 @@ class Aplicacao:
         if not caminho:
             return
 
+        nome = caminho.replace("\\", "/").split("/")[-1].rsplit(".", 1)[0]
+
         try:
-            retalhos = carregar_superficie_obj(caminho)
+            # 1º: formato Wavefront (cstype/deg/surf/parm/end)
+            freeform = carregar_superficies_freeform_obj(caminho, nome, self.cor_selecionada)
+            if freeform is None:
+                # 2º: sem "surf" -> convenção antiga, só linhas 'v'
+                freeform = [Superficie3D(nome, carregar_superficie_obj(caminho), cor=self.cor_selecionada)]
         except (OSError, ValueError, IndexError) as erro:
             messagebox.showerror("Erro", f"Não foi possível ler o arquivo:\n{erro}")
             return
 
-        nome = caminho.replace("\\", "/").split("/")[-1].rsplit(".", 1)[0]
-        self.display_file.adicionar_superficie(Superficie3D(nome, retalhos, cor=self.cor_selecionada))
+        for superficie in freeform:
+            self.display_file.adicionar_superficie(superficie)
         self._redesenhar()
 
     def _abrir_janela_transformacao_superficie(self):
