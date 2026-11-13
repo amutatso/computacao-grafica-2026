@@ -1,7 +1,7 @@
 import ast
 import math
 import tkinter as tk
-from tkinter import colorchooser, filedialog, messagebox
+from tkinter import colorchooser, filedialog, messagebox, simpledialog
 
 
 # DISPLAY FILE
@@ -794,13 +794,14 @@ def matriz_sru_para_src(vrp, vpn):
     return multiplicar_matrizes4(rotacao_y, multiplicar_matrizes4(rotacao_x, translacao))
 
 
-def projetar_paralela_ortogonal(ponto3d, vrp, vpn):
+def projetar_paralela_ortogonal(ponto3d, vrp, vpn, matriz=None):
     """Passos 1-4 do algoritmo, aplicados a UM ponto: leva o ponto
     para o sistema onde o VPN é o eixo Z (SRU -> SRC) e então ignora
     o Z -- a definição de projeção ORTOGONAL é justamente essa:
     descartar a coordenada perpendicular ao plano de projeção, sem
     nenhuma distorção de perspectiva."""
-    matriz = matriz_sru_para_src(vrp, vpn)
+    if matriz is None:
+        matriz = matriz_sru_para_src(vrp, vpn)
     x, y, _z = aplicar_matriz4_no_ponto(matriz, ponto3d.como_tupla())
     return (x, y)
 
@@ -863,7 +864,7 @@ def projetar_perspectiva(ponto3d, cop, vpn, d):
 Z_MIN_PERSPECTIVA = 1.0   # "plano near": só desenha o que está à frente do COP
 
 
-def projetar_aresta_perspectiva(p1_3d, p2_3d, cop, vpn, d):
+def projetar_aresta_perspectiva(p1_3d, p2_3d, cop, vpn, d, matriz=None):
     """
     Projeta uma ARESTA em perspectiva tratando pontos ATRÁS do COP.
     Depois dos passos 1-3 o COP está na origem e a câmera olha para +Z,
@@ -876,7 +877,8 @@ def projetar_aresta_perspectiva(p1_3d, p2_3d, cop, vpn, d):
         em z = Z_MIN (parâmetro t = (zmin - z1)/(z2 - z1)).
     Retorna ((x1,y1),(x2,y2)) já projetados, ou None.
     """
-    matriz = matriz_sru_para_src(cop, vpn)
+    if matriz is None:
+        matriz = matriz_sru_para_src(cop, vpn)
     x1, y1, z1 = aplicar_matriz4_no_ponto(matriz, p1_3d.como_tupla())
     x2, y2, z2 = aplicar_matriz4_no_ponto(matriz, p2_3d.como_tupla())
 
@@ -916,37 +918,29 @@ def carregar_objeto3d_obj(caminho):
     conjunto (set) pra não desenhar a mesma linha duas vezes.
     """
 
-    def indice_do_vertice(token):
-        # um token de face pode vir como "12", "12/5" (com textura)
-        # ou "12/5/3" ou "12//3" (com normal, sem textura) -- o
-        # índice do VÉRTICE é sempre o primeiro número, e o .obj
-        # numera a partir de 1, não de 0.
-        return int(token.split("/")[0]) - 1
-
+    # um token de face pode vir como "12", "12/5" (com textura) ou
+    # "12/5/3" / "12//3" (com normal) -- só o 1º número (o vértice)
+    # importa. Índice negativo conta de trás pra frente (-1 = o último
+    # vértice lido). _resolver_indice_obj cuida de tudo isso.
     vertices_brutos = []
     arestas_indices = set()
 
-    with open(caminho, "r", encoding="utf-8") as arquivo:
-        for linha in arquivo:
-            partes = linha.split()
-            if not partes:
-                continue
+    for partes in _linhas_logicas_obj(caminho):
+        if partes[0] == "v":
+            x, y, z = float(partes[1]), float(partes[2]), float(partes[3])
+            vertices_brutos.append((x, y, z))
 
-            if partes[0] == "v":
-                x, y, z = float(partes[1]), float(partes[2]), float(partes[3])
-                vertices_brutos.append((x, y, z))
+        elif partes[0] == "l":
+            indices = [_resolver_indice_obj(p, len(vertices_brutos)) for p in partes[1:]]
+            for i in range(len(indices) - 1):
+                arestas_indices.add(tuple(sorted((indices[i], indices[i + 1]))))
 
-            elif partes[0] == "l":
-                indices = [indice_do_vertice(p) for p in partes[1:]]
-                for i in range(len(indices) - 1):
-                    arestas_indices.add(tuple(sorted((indices[i], indices[i + 1]))))
-
-            elif partes[0] == "f":
-                indices = [indice_do_vertice(p) for p in partes[1:]]
-                n = len(indices)
-                for i in range(n):
-                    aresta = tuple(sorted((indices[i], indices[(i + 1) % n])))
-                    arestas_indices.add(aresta)
+        elif partes[0] == "f":
+            indices = [_resolver_indice_obj(p, len(vertices_brutos)) for p in partes[1:]]
+            n = len(indices)
+            for i in range(n):
+                aresta = tuple(sorted((indices[i], indices[(i + 1) % n])))
+                arestas_indices.add(aresta)
 
     pontos = [Ponto3D(*v) for v in vertices_brutos]
     arestas = [(pontos[i], pontos[j]) for i, j in arestas_indices]
@@ -986,14 +980,16 @@ def transpor_matriz4(matriz):
     return tuple(tuple(matriz[j][i] for j in range(4)) for i in range(4))
 
 
-def coeficientes_do_retalho(retalho):
+def coeficientes_do_retalho(retalho, M=None):
     """
     Para cada eixo (x, y, z) calcula C = M . G . M^T, a matriz 4x4 de
     COEFICIENTES do polinômio bicúbico: Q(s,t) = S . C . T^T. Devolve
     [Cx, Cy, Cz]. Isso só depende dos pontos de controle, então é
     calculado UMA vez por retalho e reaproveitado em todas as curvas.
+    M é a matriz do método (Bézier por padrão; B-Spline na T1.10).
     """
-    M = matriz_bezier()
+    if M is None:
+        M = matriz_bezier()
     Mt = transpor_matriz4(M)
     coeficientes = []
     for eixo in range(3):
@@ -1077,10 +1073,12 @@ class Superficie3D:
         """Todos os Ponto3D de controle, sem repetição (por identidade)
         -- usado pela janela de transformação (centro do objeto etc.)."""
         vistos = []
+        ids_vistos = set()
         for retalho in self.retalhos:
             for linha in retalho:
                 for ponto in linha:
-                    if ponto not in vistos:
+                    if id(ponto) not in ids_vistos:
+                        ids_vistos.add(id(ponto))
                         vistos.append(ponto)
         return vistos
 
@@ -1098,6 +1096,158 @@ class Superficie3D:
         return f"{self.nome} [superfície, {len(self.retalhos)} retalhos]"
 
 
+def _linhas_logicas_obj(caminho):
+    """
+    Gera, para cada linha "lógica" do .obj, a lista de seus tokens.
+    Segue o que a especificação Wavefront diz sobre o texto:
+      - comentário começa com '#' e vai até o fim da linha (ignorado);
+      - uma linha terminada em '\\' continua na linha seguinte (a
+        especificação usa isso em comandos "surf" longos);
+      - linhas em branco são ignoradas.
+    """
+    acumulada = ""
+    with open(caminho, "r", encoding="utf-8") as arquivo:
+        for linha in arquivo:
+            linha = linha.split("#", 1)[0].rstrip()
+            if linha.endswith("\\"):
+                acumulada += linha[:-1] + " "
+                continue
+            partes = (acumulada + linha).split()
+            acumulada = ""
+            if partes:
+                yield partes
+    if acumulada.split():
+        yield acumulada.split()
+
+
+def _resolver_indice_obj(token, total_vertices):
+    """
+    Converte um índice de vértice do .obj para base 0. O .obj numera a
+    partir de 1; índice NEGATIVO conta de trás pra frente a partir do
+    último vértice lido até ali (-1 = o vértice imediatamente acima).
+    O token pode vir como '7', '7/2' ou '7//3': só o 1º número importa.
+    """
+    i = int(token.split("/")[0])
+    resolvido = total_vertices + i if i < 0 else i - 1
+    if i == 0 or not 0 <= resolvido < total_vertices:
+        raise ValueError(f"índice de vértice inválido: {token} (há {total_vertices} vértices até aqui)")
+    return resolvido
+
+
+def ler_vertices_obj(caminho):
+    """Lê só as linhas 'v x y z' de um .obj e devolve uma lista de Ponto3D.
+    (O 4º número, o peso 'w' de superfícies racionais, é ignorado.)"""
+    vertices = []
+    for partes in _linhas_logicas_obj(caminho):
+        if partes[0] == "v":
+            vertices.append(Ponto3D(float(partes[1]), float(partes[2]), float(partes[3])))
+    return vertices
+
+
+def ler_superficies_obj(caminho):
+    """
+    Lê os comandos de superfície "free-form" do formato Wavefront:
+
+        cstype bezier | bspline     tipo da superfície
+        deg 3 3                     grau em u e em v
+        surf s0 s1 t0 t1 i1 i2 ...  índices dos pontos de controle
+        parm u ...  /  parm v ...   vetores de nós (knots)
+        end                         fim da superfície
+
+    Devolve (vertices, lista de dicts com tipo, grau, indices, knots_u,
+    knots_v). Os comandos cstype/deg valem para as superfícies seguintes
+    até serem trocados (são "state-setting" na especificação).
+    """
+    vertices, superficies = [], []
+    tipo, grau, atual = None, None, None
+
+    for partes in _linhas_logicas_obj(caminho):
+        comando = partes[0]
+
+        if comando == "v":
+            vertices.append(Ponto3D(float(partes[1]), float(partes[2]), float(partes[3])))
+
+        elif comando == "cstype":
+            if "rat" in partes[1:]:
+                raise ValueError("superfícies racionais (cstype rat) não são suportadas")
+            tipo = partes[-1].lower()
+
+        elif comando == "deg":
+            grau_u = int(partes[1])
+            grau = (grau_u, int(partes[2]) if len(partes) > 2 else grau_u)
+
+        elif comando == "surf":
+            # surf s0 s1 t0 t1 <índices>: os 4 primeiros são o intervalo
+            # de parâmetros, que aqui é sempre 0..1 (não usamos)
+            indices = [_resolver_indice_obj(t, len(vertices)) for t in partes[5:]]
+            atual = {"tipo": tipo, "grau": grau, "indices": indices,
+                     "knots_u": None, "knots_v": None}
+            superficies.append(atual)
+
+        elif comando == "parm" and atual is not None:
+            valores = [float(t) for t in partes[2:]]
+            atual["knots_u" if partes[1] == "u" else "knots_v"] = valores
+
+        elif comando == "end":
+            atual = None
+
+    return vertices, superficies
+
+
+def carregar_superficies_freeform_obj(caminho, nome, cor):
+    """
+    Monta as superfícies de um .obj que usa "surf" (formato Wavefront).
+    Devolve uma lista de superfícies, ou None se o arquivo não tem
+    nenhum "surf" (aí vale a convenção antiga, só com 'v').
+
+      bezier  -> cada "surf" é UM retalho (16 pontos); todos os "surf"
+                 do arquivo juntos formam UMA superfície composta.
+      bspline -> cada "surf" é uma matriz de pontos; o tamanho vem dos
+                 vetores de nós: nº de pontos = nº de nós - grau - 1.
+    """
+    vertices, superficies = ler_superficies_obj(caminho)
+    if not superficies:
+        return None
+
+    retalhos_bezier = []
+    bsplines = []
+    for numero, s in enumerate(superficies, 1):
+        if s["tipo"] not in ("bezier", "bspline"):
+            raise ValueError(f"surf {numero}: cstype '{s['tipo']}' não suportado (só bezier e bspline)")
+        if s["grau"] != (3, 3):
+            raise ValueError(f"surf {numero}: grau {s['grau']} não suportado (só 'deg 3 3', bicúbico)")
+
+        pontos = [vertices[i] for i in s["indices"]]
+
+        if s["tipo"] == "bezier":
+            if len(pontos) != 16:
+                raise ValueError(f"surf {numero}: Bézier bicúbica pede 16 pontos de controle, veio {len(pontos)}")
+            retalhos_bezier.append([pontos[0:4], pontos[4:8], pontos[8:12], pontos[12:16]])
+        else:
+            if s["knots_u"] and s["knots_v"]:
+                n_u = len(s["knots_u"]) - 4
+                n_v = len(s["knots_v"]) - 4
+                if n_u * n_v != len(pontos):
+                    raise ValueError(
+                        f"surf {numero}: os nós indicam {n_u}x{n_v} pontos, "
+                        f"mas o surf lista {len(pontos)}"
+                    )
+            elif len(pontos) == 16:
+                n_u = 4   # sem 'parm': só dá pra afirmar que 16 pontos = 4x4
+            else:
+                raise ValueError(f"surf {numero}: B-Spline com {len(pontos)} pontos precisa dos comandos 'parm u/v'")
+            matriz = montar_matriz_de_pontos(pontos, n_u)
+            bsplines.append(matriz)
+
+    resultado = []
+    if retalhos_bezier:
+        resultado.append(Superficie3D(nome, retalhos_bezier, cor))
+    for k, matriz in enumerate(bsplines, 1):
+        sufixo = f"_{k}" if len(bsplines) > 1 else ""
+        resultado.append(SuperficieBSpline3D(nome + sufixo, matriz, cor=cor))
+    return resultado
+
+
 def carregar_superficie_obj(caminho):
     """
     Lê um .obj de PONTOS DE CONTROLE (só linhas "v") e devolve a lista
@@ -1106,12 +1256,7 @@ def carregar_superficie_obj(caminho):
     = linha 1, os 4 seguintes = linha 2, ...). Logo, 3 retalhos =
     48 vértices.
     """
-    vertices = []
-    with open(caminho, "r", encoding="utf-8") as arquivo:
-        for linha in arquivo:
-            partes = linha.split()
-            if partes and partes[0] == "v":
-                vertices.append(Ponto3D(float(partes[1]), float(partes[2]), float(partes[3])))
+    vertices = ler_vertices_obj(caminho)
 
     if not vertices or len(vertices) % 16 != 0:
         raise ValueError(
@@ -1124,6 +1269,152 @@ def carregar_superficie_obj(caminho):
         bloco = vertices[inicio:inicio + 16]
         retalhos.append([bloco[0:4], bloco[4:8], bloco[8:12], bloco[12:16]])
     return retalhos
+
+
+# SUPERFÍCIES B-SPLINE COM FORWARD DIFFERENCES (Trabalho 1.10)
+#
+# Algoritmo dos slides (Aula 9.2, "Algoritmo Forward Differences para
+# Superfícies"), para UM retalho 4x4:
+#
+#   Inicialização
+#     1. Cx = M . Gx . M^T   (idem y, z)         -- coeficientes
+#     2. delta_s = 1/(n_s - 1),  delta_t = 1/(n_t - 1)
+#     3. E(delta_s), E(delta_t) e a transposta de E(delta_t)
+#   DesenhaSuperficieFwdDiff(n_s, n_t, Cx, Cy, Cz, E_s, E_t)
+#     4. Condições iniciais:  DD = E(delta_s) . C . E(delta_t)^T
+#     5. Família de curvas em t: para i de 1 até n_s
+#          - desenha a curva com a 1ª linha de DD (cond. iniciais em t)
+#          - atualiza DD somando linhas (cond. iniciais da próxima curva)
+#     6. Recalcula DD (o passo 5 "gastou" a matriz)
+#     7. Transpõe DD
+#     8. Família de curvas em s: para i de 1 até n_t, igual ao passo 5
+#
+# Como ler DD (matriz 4x4 das condições iniciais): a 1ª LINHA guarda
+# [f, Δt f, Δt² f, Δt³ f] em (s=0, t=0), ou seja, tudo que a curva em t
+# precisa para começar. As LINHAS de baixo guardam as diferenças em s;
+# somar linha_i <- linha_i + linha_(i+1) (de cima para baixo) "dá um
+# passo" em s e deixa na 1ª linha as condições iniciais da próxima curva.
+# Cada curva em si é o mesmo DesenhaCurvaFwdDiff das curvas 2D, só que
+# com x, y e z.
+#
+# O professor avisou que o algoritmo do Foley & van Dam tem erros; esta
+# versão segue os slides dele: delta = 1/(n - 1) (n pontos por curva,
+# chegando exatamente em 1), a recomputação do DD no passo 6 antes de
+# transpor, e a soma de linhas na ordem de cima para baixo.
+
+def _desenha_curva_fwd_diff(n, estado_x, estado_y, estado_z):
+    """
+    DesenhaCurvaFwdDiff: gera n pontos 3D de uma curva a partir das
+    condições iniciais [f, Δf, Δ²f, Δ³f] de cada coordenada -- só somas.
+    """
+    x, dx, d2x, d3x = estado_x
+    y, dy, d2y, d3y = estado_y
+    z, dz, d2z, d3z = estado_z
+
+    pontos = [(x, y, z)]
+    for _ in range(n - 1):
+        x += dx;  dx += d2x;  d2x += d3x
+        y += dy;  dy += d2y;  d2y += d3y
+        z += dz;  dz += d2z;  d2z += d3z
+        pontos.append((x, y, z))
+    return pontos
+
+
+def _atualizar_dd_por_soma_de_linhas(dd):
+    """linha1 <- linha1 + linha2; linha2 <- linha2 + linha3;
+    linha3 <- linha3 + linha4 (nessa ordem, de cima para baixo, para
+    sempre somar valores ainda NÃO atualizados)."""
+    for i in range(3):
+        for j in range(4):
+            dd[i][j] += dd[i + 1][j]
+
+
+def gerar_polilinhas_fwd_diff(Cx, Cy, Cz, n_s, n_t):
+    """
+    DesenhaSuperficieFwdDiff para um retalho. Devolve a lista de
+    polilinhas 3D: n_s curvas em t (cada uma com n_t pontos) seguidas de
+    n_t curvas em s (cada uma com n_s pontos).
+    """
+    delta_s = 1 / (n_s - 1)
+    delta_t = 1 / (n_t - 1)
+    E_s = _matriz_diferencas(delta_s)
+    E_t_transposta = transpor_matriz4(_matriz_diferencas(delta_t))
+
+    def condicoes_iniciais():
+        # DD = E(delta_s) . C . E(delta_t)^T, uma matriz 4x4 por coordenada
+        return [
+            [list(linha) for linha in multiplicar_matrizes4(multiplicar_matrizes4(E_s, C), E_t_transposta)]
+            for C in (Cx, Cy, Cz)
+        ]
+
+    polilinhas = []
+
+    # passos 4 e 5: família de curvas em t
+    ddx, ddy, ddz = condicoes_iniciais()
+    for _ in range(n_s):
+        polilinhas.append(_desenha_curva_fwd_diff(n_t, ddx[0], ddy[0], ddz[0]))
+        for dd in (ddx, ddy, ddz):
+            _atualizar_dd_por_soma_de_linhas(dd)
+
+    # passos 6 e 7: recalcula as condições iniciais e transpõe
+    ddx, ddy, ddz = [[list(coluna) for coluna in zip(*dd)] for dd in condicoes_iniciais()]
+
+    # passo 8: família de curvas em s
+    for _ in range(n_t):
+        polilinhas.append(_desenha_curva_fwd_diff(n_s, ddx[0], ddy[0], ddz[0]))
+        for dd in (ddx, ddy, ddz):
+            _atualizar_dd_por_soma_de_linhas(dd)
+
+    return polilinhas
+
+
+class SuperficieBSpline3D(Superficie3D):
+    """
+    Superfície B-Spline bicúbica definida por UMA matriz de pontos de
+    controle de 4x4 até 20x20 (linhas x colunas). O sistema percorre a
+    matriz com uma janela 4x4 que desliza de 1 em 1 (como nos slides:
+    A1:D4, B1:E4, C1:F4, ... e depois a linha de baixo) e cada janela
+    é um retalho. Uma matriz n x m gera (n-3) x (m-3) retalhos. Os
+    retalhos vizinhos COMPARTILHAM os mesmos Ponto3D, então transformar
+    um ponto de controle mexe em todos os retalhos que o usam, e a
+    continuidade C2 das B-Splines vem de graça (sem duplicar pontos).
+    """
+
+    N_S = 8   # pontos por curva em s (e nº de curvas em t), por retalho
+    N_T = 8   # pontos por curva em t (e nº de curvas em s), por retalho
+
+    def __init__(self, nome, matriz_pontos, cor="#800080"):
+        linhas = len(matriz_pontos)
+        colunas = len(matriz_pontos[0])
+        retalhos = []
+        for i in range(linhas - 3):
+            for j in range(colunas - 3):
+                retalhos.append([linha[j:j + 4] for linha in matriz_pontos[i:i + 4]])
+        super().__init__(nome, retalhos, cor)
+        self.linhas = linhas
+        self.colunas = colunas
+
+    def gerar_polilinhas(self):
+        M = matriz_bspline()
+        polilinhas = []
+        for retalho in self.retalhos:
+            Cx, Cy, Cz = coeficientes_do_retalho(retalho, M)
+            polilinhas.extend(gerar_polilinhas_fwd_diff(Cx, Cy, Cz, self.N_S, self.N_T))
+        return polilinhas
+
+    def __repr__(self):
+        return f"{self.nome} [B-Spline {self.linhas}x{self.colunas}, {len(self.retalhos)} retalhos]"
+
+
+def montar_matriz_de_pontos(vertices, n_colunas):
+    """Organiza uma lista plana de Ponto3D (ordem do .obj) numa matriz
+    linhas x n_colunas, preenchida linha por linha."""
+    if n_colunas < 4 or n_colunas > 20 or len(vertices) % n_colunas != 0:
+        raise ValueError(f"{len(vertices)} vértices não formam uma matriz com {n_colunas} colunas")
+    n_linhas = len(vertices) // n_colunas
+    if n_linhas < 4 or n_linhas > 20:
+        raise ValueError(f"a matriz ficaria {n_linhas}x{n_colunas}; o permitido é de 4x4 até 20x20")
+    return [vertices[i * n_colunas:(i + 1) * n_colunas] for i in range(n_linhas)]
 
 
 # LEITURA E ESCRITA DE ARQUIVOS .OBJ (herdadas da entrega anterior)
@@ -1173,10 +1464,41 @@ def salvar_mundo_obj(display_file, caminho):
         arquivo.write("\n".join(linhas) + "\n")
 
 
-def carregar_mundo_obj(caminho):
+# Cores de materiais (usemtl) reconhecidas. O .mtl em si não é lido:
+# só mapeamos os nomes mais comuns; qualquer outro vira preto.
+CORES_USEMTL = {
+    "red": "#ff0000", "green": "#00aa00", "blue": "#0000ff", "black": "#000000",
+    "yellow": "#dddd00", "cyan": "#00cccc", "magenta": "#cc00cc", "orange": "#ff8800",
+    "purple": "#800080", "gray": "#808080", "grey": "#808080", "white": "#cccccc",
+}
+
+
+def _indice_obj(token):
+    """Índice de vértice de um token do .obj ('7', '7/2' ou '7//3'),
+    convertido para base 0 (o .obj numera a partir de 1)."""
+    return int(token.split("/")[0]) - 1
+
+
+def ler_mundo_obj(caminho):
+    """
+    Lê um .obj 2D no estilo do Moodle e devolve (objetos, janela):
+      o nome            -> começa um objeto
+      v x y [z]         -> vértice (z e quaisquer números extras são ignorados)
+      p i               -> ponto
+      l i j             -> reta;   l i j k ... i (fecha) -> polígono (wireframe)
+      f i j k           -> face (tratada como wireframe)
+      usemtl nome       -> cor do objeto (red, green, ...)
+      w i j            -> (em um objeto "window") window = retângulo entre
+                          os vértices i e j
+    Também entende os comentários "# tipo", "# cor" e "# preenchido" que o
+    nosso "Salvar mundo" grava, que têm prioridade sobre a inferência.
+    `objetos` é uma lista de (nome, tipo, coordenadas, cor, preenchido);
+    `janela` é ((x1, y1), (x2, y2)) ou None.
+    """
     vertices_globais = []
     objetos_lidos = []
     atual = None
+    indices_janela = None
 
     with open(caminho, "r", encoding="utf-8") as arquivo:
         for linha_bruta in arquivo:
@@ -1185,12 +1507,11 @@ def carregar_mundo_obj(caminho):
                 continue
 
             if linha.startswith("o "):
-                if atual is not None:
-                    objetos_lidos.append(atual)
                 atual = {
-                    "nome": linha[2:].strip(), "tipo": "wireframe",
+                    "nome": linha[2:].strip(), "tipo": None, "comando": None,
                     "cor": "#000000", "preenchido": False, "indices": [],
                 }
+                objetos_lidos.append(atual)
 
             elif linha.startswith("# tipo "):
                 if atual is not None:
@@ -1204,27 +1525,53 @@ def carregar_mundo_obj(caminho):
                 if atual is not None:
                     atual["preenchido"] = linha[len("# preenchido "):].strip() == "True"
 
+            elif linha.startswith("usemtl "):
+                if atual is not None:
+                    nome_material = linha[len("usemtl "):].strip().lower()
+                    atual["cor"] = CORES_USEMTL.get(nome_material, "#000000")
+
             elif linha.startswith("v "):
-                _, x, y, _z = linha.split()
-                vertices_globais.append((float(x), float(y)))
+                partes = linha.split()
+                vertices_globais.append((float(partes[1]), float(partes[2])))
+
+            elif linha.startswith("w "):
+                indices_janela = [_indice_obj(t) for t in linha.split()[1:3]]
 
             elif linha.startswith(("p ", "l ", "f ")):
                 if atual is not None:
-                    partes = linha.split()[1:]
-                    atual["indices"] = [int(p) - 1 for p in partes]
-
-        if atual is not None:
-            objetos_lidos.append(atual)
+                    partes = linha.split()
+                    atual["comando"] = partes[0]
+                    atual["indices"] = [_indice_obj(t) for t in partes[1:]]
 
     resultado = []
     for info in objetos_lidos:
         indices = info["indices"]
-        if info["tipo"] == "wireframe" and len(indices) > 1 and indices[0] == indices[-1]:
-            indices = indices[:-1]
-        coordenadas = [vertices_globais[i] for i in indices]
-        resultado.append((info["nome"], info["tipo"], coordenadas, info["cor"], info["preenchido"]))
+        if not indices:
+            continue   # ex.: o objeto "window", que só tem a linha "w"
 
-    return resultado
+        tipo = info["tipo"]
+        if tipo is None:
+            # o arquivo não disse o tipo: infere pelo comando
+            if info["comando"] == "p":
+                tipo = "ponto"
+            elif info["comando"] == "l" and len(indices) == 2:
+                tipo = "reta"
+            else:
+                tipo = "wireframe"
+
+        if tipo == "wireframe" and len(indices) > 1 and indices[0] == indices[-1]:
+            indices = indices[:-1]   # "l 4 5 6 7 4" fecha repetindo o 1º
+        coordenadas = [vertices_globais[i] for i in indices]
+        resultado.append((info["nome"], tipo, coordenadas, info["cor"], info["preenchido"]))
+
+    janela = None
+    if indices_janela is not None:
+        janela = (vertices_globais[indices_janela[0]], vertices_globais[indices_janela[1]])
+    return resultado, janela
+
+
+def carregar_mundo_obj(caminho):
+    return ler_mundo_obj(caminho)[0]
 
 
 # JANELA DE TRANSFORMAÇÕES 2D (herdada das entregas anteriores)
@@ -1787,16 +2134,29 @@ class Aplicacao:
             command=self._abrir_janela_transformacao_superficie,
         ).pack(pady=(5, 0))
 
-        tk.Label(painel, text="Nome da superfície:").pack(anchor="w", pady=(10, 0))
+        tk.Label(painel, text="Tipo de superfície:").pack(anchor="w", pady=(10, 0))
+        self.tipo_superficie = tk.StringVar(value="bezier")
+        tk.Radiobutton(
+            painel, text="Bézier (funções de suavização)",
+            variable=self.tipo_superficie, value="bezier",
+        ).pack(anchor="w")
+        tk.Radiobutton(
+            painel, text="B-Spline (forward differences)",
+            variable=self.tipo_superficie, value="bspline",
+        ).pack(anchor="w")
+
+        tk.Label(painel, text="Nome da superfície:").pack(anchor="w", pady=(5, 0))
         self.entrada_nome_superficie = tk.Entry(painel, width=32)
         self.entrada_nome_superficie.pack()
 
         tk.Label(
             painel,
-            text="Pontos de controle: 4 linhas de 4 pontos por\n"
-                 "retalho, linhas separadas por ';' :\n"
-                 "(x,y,z),(x,y,z),(x,y,z),(x,y,z);(...);(...);(...)\n"
-                 "(4 linhas = 1 retalho; 12 linhas = 3 retalhos)",
+            text="Pontos de controle, linhas separadas por ';' :\n"
+                 "(x,y,z),(x,y,z),...;(x,y,z),(x,y,z),...;...\n"
+                 "Bézier: 4 pontos por linha; cada 4 linhas = 1\n"
+                 "retalho (12 linhas = 3 retalhos).\n"
+                 "B-Spline: UMA matriz de 4x4 até 20x20 (o\n"
+                 "sistema divide em retalhos 4x4 sozinho).",
             justify="left", font=("TkDefaultFont", 8),
         ).pack(anchor="w")
         self.entrada_pontos_superficie = tk.Entry(painel, width=32)
@@ -2008,43 +2368,99 @@ class Aplicacao:
 
         return [linhas[i:i + 4] for i in range(0, len(linhas), 4)]
 
+    @staticmethod
+    def _parsear_matriz_de_pontos(texto):
+        """
+        Matriz de pontos de controle para a B-Spline: linhas separadas
+        por ';', cada linha com a mesma quantidade de pontos (x,y,z).
+        Aceita de 4x4 até 20x20.
+        """
+        linhas_texto = [t.strip() for t in texto.split(";") if t.strip()]
+        matriz = [Aplicacao._parsear_coordenadas_3d(t) for t in linhas_texto]
+
+        n_linhas = len(matriz)
+        if n_linhas < 4 or n_linhas > 20:
+            raise ValueError(f"a matriz tem {n_linhas} linhas; o permitido é de 4 a 20")
+        n_colunas = len(matriz[0])
+        if any(len(linha) != n_colunas for linha in matriz):
+            raise ValueError("todas as linhas precisam ter o mesmo número de pontos")
+        if n_colunas < 4 or n_colunas > 20:
+            raise ValueError(f"a matriz tem {n_colunas} colunas; o permitido é de 4 a 20")
+        return matriz
+
     def _adicionar_superficie(self):
         nome = self.entrada_nome_superficie.get().strip()
         if not nome:
             messagebox.showerror("Erro", "Informe um nome para a superfície.")
             return
 
+        texto = self.entrada_pontos_superficie.get().strip()
+        bspline = self.tipo_superficie.get() == "bspline"
         try:
-            retalhos = self._parsear_retalhos(self.entrada_pontos_superficie.get().strip())
+            if bspline:
+                superficie = SuperficieBSpline3D(
+                    nome, self._parsear_matriz_de_pontos(texto), cor=self.cor_selecionada
+                )
+            else:
+                superficie = Superficie3D(nome, self._parsear_retalhos(texto), cor=self.cor_selecionada)
         except (ValueError, SyntaxError, TypeError, IndexError) as erro:
-            messagebox.showerror(
-                "Erro",
-                "Pontos de controle inválidos.\n"
-                "Use 4 linhas de 4 pontos (x,y,z) por retalho, separadas por ';'.\n"
-                f"({erro})",
+            formato = (
+                "uma matriz de 4x4 até 20x20 pontos (x,y,z), linhas separadas por ';'"
+                if bspline else
+                "4 linhas de 4 pontos (x,y,z) por retalho, separadas por ';'"
             )
+            messagebox.showerror("Erro", f"Pontos de controle inválidos.\nUse {formato}.\n({erro})")
             return
 
-        self.display_file.adicionar_superficie(Superficie3D(nome, retalhos, cor=self.cor_selecionada))
+        self.display_file.adicionar_superficie(superficie)
         self.entrada_nome_superficie.delete(0, tk.END)
         self.entrada_pontos_superficie.delete(0, tk.END)
         self._redesenhar()
 
     def _carregar_superficie_obj(self):
-        """Carrega uma superfície composta de um .obj de pontos de
-        controle (16 vértices 'v' por retalho)."""
+        """Carrega uma superfície de um .obj de pontos de controle.
+        Bézier: 16 vértices 'v' por retalho. B-Spline: todos os 'v'
+        formam uma matriz (linha por linha) de 4x4 até 20x20."""
         caminho = filedialog.askopenfilename(filetypes=[("Wavefront OBJ", "*.obj")])
         if not caminho:
             return
 
+        nome = caminho.replace("\\", "/").split("/")[-1].rsplit(".", 1)[0]
+
         try:
-            retalhos = carregar_superficie_obj(caminho)
+            # 1º: formato Wavefront de verdade (cstype/deg/surf/parm/end);
+            # nele o próprio arquivo diz se é Bézier ou B-Spline
+            freeform = carregar_superficies_freeform_obj(caminho, nome, self.cor_selecionada)
+            if freeform is not None:
+                for superficie in freeform:
+                    self.display_file.adicionar_superficie(superficie)
+                self._redesenhar()
+                return
+
+            # 2º: sem "surf" -> convenção antiga, só linhas 'v'
+            if self.tipo_superficie.get() == "bspline":
+                # B-Spline: todos os 'v' formam UMA matriz linha por linha; o
+                # .obj não diz quantas colunas ela tem, então perguntamos
+                vertices = ler_vertices_obj(caminho)
+                raiz = math.isqrt(len(vertices))
+                sugestao = raiz if raiz * raiz == len(vertices) else None
+                n_colunas = simpledialog.askinteger(
+                    "Matriz de pontos de controle",
+                    f"O arquivo tem {len(vertices)} pontos de controle.\n"
+                    "Quantas COLUNAS tem a matriz (4 a 20)?",
+                    initialvalue=sugestao, minvalue=4, maxvalue=20,
+                )
+                if n_colunas is None:
+                    return
+                matriz = montar_matriz_de_pontos(vertices, n_colunas)
+                superficie = SuperficieBSpline3D(nome, matriz, cor=self.cor_selecionada)
+            else:
+                superficie = Superficie3D(nome, carregar_superficie_obj(caminho), cor=self.cor_selecionada)
         except (OSError, ValueError, IndexError) as erro:
             messagebox.showerror("Erro", f"Não foi possível ler o arquivo:\n{erro}")
             return
 
-        nome = caminho.replace("\\", "/").split("/")[-1].rsplit(".", 1)[0]
-        self.display_file.adicionar_superficie(Superficie3D(nome, retalhos, cor=self.cor_selecionada))
+        self.display_file.adicionar_superficie(superficie)
         self._redesenhar()
 
     def _abrir_janela_transformacao_superficie(self):
@@ -2104,7 +2520,7 @@ class Aplicacao:
                 return
 
         try:
-            objetos_lidos = carregar_mundo_obj(caminho)
+            objetos_lidos, janela = ler_mundo_obj(caminho)
         except (OSError, ValueError, IndexError) as erro:
             messagebox.showerror("Erro", f"Não foi possível ler o arquivo:\n{erro}")
             return
@@ -2112,6 +2528,18 @@ class Aplicacao:
         self.display_file.limpar()
         for nome, tipo, coordenadas, cor, preenchido in objetos_lidos:
             self.display_file.adicionar(nome, tipo, coordenadas, cor, preenchido)
+
+        # "o window" + "w i j": o arquivo define a window como o retângulo
+        # entre os vértices i e j
+        if janela is not None:
+            (x1, y1), (x2, y2) = janela
+            largura, altura = abs(x2 - x1), abs(y2 - y1)
+            if largura > 0 and altura > 0:
+                self.window.centro_x = (x1 + x2) / 2
+                self.window.centro_y = (y1 + y2) / 2
+                self.window.largura = largura
+                self.window.altura = altura
+                self.window.angulo = 0.0
         self._redesenhar()
 
     # ---- Ações do usuário: objetos 3D ----
@@ -2330,6 +2758,10 @@ class Aplicacao:
 
         # ---- Objetos 3D: projeção paralela OU perspectiva (T1.7/T1.8) ----
         usar_perspectiva = self.tipo_projecao.get() == "perspectiva"
+        # a matriz SRU -> SRC só depende da câmera: calcula UMA vez por
+        # redesenho (superfícies B-Spline grandes têm dezenas de milhares
+        # de segmentos)
+        matriz_camera = matriz_sru_para_src(self.vrp, self.vpn)
 
         for objeto3d in self.display_file.objetos_3d:
             self.lista_objetos_3d.insert(tk.END, repr(objeto3d))
@@ -2337,7 +2769,7 @@ class Aplicacao:
             for p1_3d, p2_3d in objeto3d.arestas:
                 self._desenhar_segmento_3d(
                     p1_3d, p2_3d, objeto3d.cor, usar_perspectiva, usar_liang_barsky,
-                    (xmin, xmax, ymin, ymax),
+                    (xmin, xmax, ymin, ymax), matriz_camera,
                 )
 
         # ---- Superfícies bicúbicas de Bézier (T1.9) ----
@@ -2353,10 +2785,10 @@ class Aplicacao:
                     self._desenhar_segmento_3d(
                         Ponto3D(*polilinha[i]), Ponto3D(*polilinha[i + 1]),
                         superficie.cor, usar_perspectiva, usar_liang_barsky,
-                        (xmin, xmax, ymin, ymax),
+                        (xmin, xmax, ymin, ymax), matriz_camera,
                     )
 
-    def _desenhar_segmento_3d(self, p1_3d, p2_3d, cor, usar_perspectiva, usar_liang_barsky, limites):
+    def _desenhar_segmento_3d(self, p1_3d, p2_3d, cor, usar_perspectiva, usar_liang_barsky, limites, matriz_camera):
         """Projeta, clipa (2D) e desenha UM segmento 3D -- passos 1-7
         do algoritmo. Compartilhado por objetos 3D e superfícies."""
         xmin, xmax, ymin, ymax = limites
@@ -2364,13 +2796,15 @@ class Aplicacao:
         # passos 1-4 do algoritmo (paralela ou perspectiva --
         # os passos 1-3, SRU -> SRC, são os mesmos nos dois)
         if usar_perspectiva:
-            par = projetar_aresta_perspectiva(p1_3d, p2_3d, self.vrp, self.vpn, self.d_perspectiva)
+            par = projetar_aresta_perspectiva(
+                p1_3d, p2_3d, self.vrp, self.vpn, self.d_perspectiva, matriz_camera
+            )
             if par is None:
                 return   # segmento inteiro atrás do COP
             p1_2d, p2_2d = par
         else:
-            p1_2d = projetar_paralela_ortogonal(p1_3d, self.vrp, self.vpn)
-            p2_2d = projetar_paralela_ortogonal(p2_3d, self.vrp, self.vpn)
+            p1_2d = projetar_paralela_ortogonal(p1_3d, self.vrp, self.vpn, matriz_camera)
+            p2_2d = projetar_paralela_ortogonal(p2_3d, self.vrp, self.vpn, matriz_camera)
 
         # passos 5-7: a partir daqui é um ponto 2D comum --
         # reaproveita window/clipping/viewport já prontos
